@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,15 +18,29 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
+      - name: Install package
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install .
       - name: Run unit tests
-        env:
-          PYTHONPATH: src
         run: |
           python -m unittest discover -s tests -p "test_*.py" -v
-      - name: Validate Dockerfile
+      - name: Validate bootstrap module
         run: |
-          docker build -t moyu-tg-relay:test -f deploy/docker/Dockerfile .
+          python -m moyu_tg_relay.bootstrap_session --help
+      - name: Validate Compose configuration
+        run: |
+          docker compose --env-file deploy/docker/env.example -f deploy/docker/compose.yml config >/dev/null
+      - name: Build Compose image
+        run: |
+          docker compose --env-file deploy/docker/env.example -f deploy/docker/compose.yml build
+      - name: Validate Compose bootstrap path
+        run: |
+          docker compose --env-file deploy/docker/env.example -f deploy/docker/compose.yml run --rm --no-deps \
+            moyu-tg-relay python -m moyu_tg_relay.bootstrap_session --help
+      - name: Validate systemd deployment contract
+        run: |
+          grep -F 'EnvironmentFile=/etc/moyu-tg-relay.env' deploy/systemd/moyu-tg-relay.service
+          grep -F 'ExecStart=/opt/moyu-tg-relay/.venv/bin/python -m uvicorn moyu_tg_relay.app:app' deploy/systemd/moyu-tg-relay.service
+          grep -F '.venv/bin/pip install .' deploy/systemd/README.md
+          grep -F '. /etc/moyu-tg-relay.env' deploy/systemd/README.md
