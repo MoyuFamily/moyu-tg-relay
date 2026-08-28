@@ -12,6 +12,7 @@ from dataclasses import dataclass
 CODE_PATTERN = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
 CODE_HINTS = ("verification", "verify", "code", "renew")
 TERMINAL_STATUSES = frozenset({"consumed", "expired", "cancelled"})
+TERMINAL_RETENTION_SECONDS = 600
 
 
 @dataclass
@@ -49,10 +50,18 @@ class PendingOtpStore:
 
     def _expire_locked(self) -> None:
         now = self._clock()
-        for item in self._items.values():
+        stale_request_ids: list[str] = []
+        for request_id, item in self._items.items():
             if item.status in {"pending", "ready"} and now >= item.expires_at:
                 item.status = "expired"
                 item.code = ""
+            if (
+                item.status in TERMINAL_STATUSES
+                and now >= item.expires_at + TERMINAL_RETENTION_SECONDS
+            ):
+                stale_request_ids.append(request_id)
+        for request_id in stale_request_ids:
+            del self._items[request_id]
 
     def create(self, account: str, ttl_seconds: int = 300) -> PendingOtp:
         normalized_account = str(account or "").strip()
