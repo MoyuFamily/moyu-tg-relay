@@ -32,7 +32,8 @@ jobs:
       - name: Validate guided deployment script
         run: |
           bash -n deploy/install.sh
-          bash deploy/install.sh --help | grep -F 'Telegram Session bootstrap'
+          bash deploy/install.sh --help | grep -F 'Moyu Telegram Relay guided deployment'
+          test -x deploy/install.sh
           test ! -e deploy/docker/env.example
       - name: Validate Compose configuration
         run: |
