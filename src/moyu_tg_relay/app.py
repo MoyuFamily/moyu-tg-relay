@@ -202,11 +202,13 @@ def consume_request(request_id: str) -> ConsumeResponse:
 @app.delete(
     "/v1/otp/requests/{request_id}",
     status_code=204,
+    response_class=Response,
     dependencies=[Depends(require_auth)],
 )
-def cancel_request(request_id: str) -> None:
+def cancel_request(request_id: str) -> Response:
     try:
         store.cancel(request_id)
+        return Response(status_code=204)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="request not found") from error
 
