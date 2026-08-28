@@ -14,68 +14,99 @@
 ## 🌟 核心特性
 
 - 🔒 **严格安全边界**：
-  - 基于 Bearer Token 强鉴权与 Constant-Time 签名比较；
-  - 彻底关闭 Swagger / OpenAPI / ReDoc 公开调试端点；
-  - 生产级沙箱：systemd 单元（14 项内核级加固）、Docker（`read_only: true` + `cap_drop: [ALL]`）。
-- ⚡ **轻量且高内聚**：
-  - 基于 FastAPI + Telethon 构建，非阻塞异步监听；
-  - 纯内存线程安全状态管理，支持 TTL 自动过期与一次性消费（One-Time Consume）。
-- 🐳 **双模部署支持**：
-  - **Docker Compose**：内置命名卷持久化 session 与 readiness 健康检查；
-  - **systemd**：提供开箱即用的 Linux 主机守护服务与权限配置指南。
+  - Bearer Token 强鉴权与 constant-time 比较；
+  - Swagger / OpenAPI / ReDoc 默认关闭；
+  - systemd 沙箱与 Docker `read_only + cap_drop: ALL`；
+  - Telethon Session 永远留在 Relay VPS，不进入 GitHub Actions。
+- ⚡ **短生命周期 OTP 状态**：
+  - 单 Telegram 账号只有一个 active request；
+  - TTL、一次性 consume、终态自动回收；
+  - sender 与 Telegram Account ID 双重约束。
+- 🐳 **双模部署**：
+  - Docker Compose：named volume 持久化 Session，`/readyz` 作为容器健康检查；
+  - systemd：代码 root-owned，仅 `/var/lib/moyu-tg-relay` 可持久写入。
+- 🧭 **引导式部署**：自动生成 Bearer Token、完成 Session bootstrap、提取并回填 `TELEGRAM_ACCOUNT_ID`、启动服务并执行完整 smoke check。
 
 ---
 
-## 🚀 极速部署
+## 🚀 推荐：引导式部署
 
-### 方式一：Docker Compose（推荐）
-
-1. **配置环境变量**：
-   ```bash
-   cp deploy/docker/env.example .env
-   # 先填入真实 TELEGRAM_API_ID、TELEGRAM_API_HASH、OTP_RELAY_BEARER_TOKEN。
-   # TELEGRAM_ACCOUNT_ID 在 bootstrap 后再写回。
-   nano .env
-   ```
-
-2. **在 Compose 命名卷中交互式初始化 Telegram Session**：
-   ```bash
-   docker compose --env-file .env -f deploy/docker/compose.yml build
-   docker compose --env-file .env -f deploy/docker/compose.yml run --rm --no-deps \
-     moyu-tg-relay python -m moyu_tg_relay.bootstrap_session \
-     --session-path /data/telegram.session
-   ```
-
-   bootstrap 成功后会输出：
-   ```text
-   Telegram session authorised. TELEGRAM_ACCOUNT_ID=<your-id>
-   ```
-
-   **把输出的真实 `TELEGRAM_ACCOUNT_ID` 写回 `.env`**。Session 已保存在 Compose 的 `moyu-tg-relay-data` 命名卷中，正式容器会直接复用 `/data/telegram.session`。
-
-3. **启动容器**：
-   ```bash
-   docker compose --env-file .env -f deploy/docker/compose.yml up -d
-   docker compose --env-file .env -f deploy/docker/compose.yml ps
-   ```
-
-### 方式二：Linux systemd 原生部署
-
-详细指南请参阅 [deploy/systemd/README.md](deploy/systemd/README.md)。
-
----
-
-## 🔍 健康检查与探针
+克隆仓库后只需要运行一个入口：
 
 ```bash
-# 检查基础存活 (Liveness)
-python3 smoke_check.py --base-url http://127.0.0.1:8787
-
-# 完整就绪性与鉴权校验 (Readiness)
-python3 smoke_check.py --base-url http://127.0.0.1:8787 --token <YOUR_BEARER_TOKEN>
+git clone https://github.com/MoyuFamily/moyu-tg-relay.git
+cd moyu-tg-relay
+./deploy/install.sh
 ```
 
-带 `--token` 的完整 smoke check 会把 `/readyz` 非 200 视为失败，并验证受保护 API 会拒绝错误 Bearer Token。
+如果 Docker Compose 和 systemd 都可用，向导会让你选择部署方式。也可以直接指定：
+
+```bash
+# Docker Compose（推荐）
+./deploy/install.sh docker
+
+# Native systemd
+sudo ./deploy/install.sh systemd
+```
+
+首次部署时用户只需要提供 Telegram `API ID` / `API Hash`，随后按 Telethon 提示输入手机号、Telegram 登录验证码以及账号开启 2FA 时的密码。其余步骤由脚本自动完成：
+
+```text
+配置检查
+  -> 自动生成 Relay Bearer Token
+  -> 构建/安装 runtime
+  -> Telegram Session bootstrap
+  -> 自动捕获 TELEGRAM_ACCOUNT_ID
+  -> 写回受限权限 env 文件
+  -> 启动 Relay
+  -> /healthz + /readyz
+  -> Bearer reject + accept smoke check
+```
+
+脚本是幂等入口：已有有效 Session 与 `TELEGRAM_ACCOUNT_ID` 时会直接复用，不会每次重新登录 Telegram。
+
+> Relay 只监听 `127.0.0.1:8787`。远程 `moyu-renew` 应通过 Caddy/Nginx/Traefik 暴露 **HTTPS**，不要把 8787 明文端口直接开放到公网。向导完成后可输入域名获取对应 Caddy snippet。
+
+手工部署与排障文档见 [deploy/README.md](deploy/README.md)。
+
+---
+
+## 🔍 健康检查与上线验收
+
+基础 liveness：
+
+```bash
+python3 smoke_check.py --base-url http://127.0.0.1:8787
+```
+
+完整 readiness + auth：
+
+```bash
+# Docker：脚本会自动在容器内部执行，无需把 Token 放到命令历史。
+
+docker compose --env-file .env -f deploy/docker/compose.yml exec -T moyu-tg-relay \
+  python /app/smoke_check.py --base-url http://127.0.0.1:8787
+
+# systemd：从受限权限的 env 文件安全读取 Token。
+sudo /opt/moyu-tg-relay/.venv/bin/python /opt/moyu-tg-relay/smoke_check.py \
+  --base-url http://127.0.0.1:8787 \
+  --env-file /etc/moyu-tg-relay.env
+```
+
+完整 smoke check 会验证：HTTP 存活、Telethon 当前 ready、错误 Bearer Token 返回 401，以及正确 Token 能通过鉴权并到达受保护 handler。
+
+---
+
+## 🔗 `moyu-renew` 接入
+
+Relay 通过 HTTPS 暴露后，`moyu-renew` 只需要两个 Secret：
+
+```text
+HAX_OTP_RELAY_URL=https://relay.example.com
+HAX_OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
+```
+
+Telegram API ID / Hash 和 `.session` 不应进入 `moyu-renew` 或 GitHub Actions。
 
 ---
 
