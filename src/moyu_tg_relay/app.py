@@ -4,9 +4,11 @@ Run this service on an independent private VPS. The Telethon session remains on
 that VPS and is never passed to GitHub Actions or committed to this repository.
 
 Besides one-time verification codes, the relay can recognize tightly-scoped Hax
-Telegram confirmation cards. It attempts only explicitly allow-listed buttons;
-unknown or failed interactions are surfaced as ``human_required`` so the caller
-can notify the user and keep the original browser session alive for fallback.
+Telegram confirmation cards. It attempts only explicitly allow-listed buttons
+that Telethon can actually execute without opening a browser or requesting extra
+user consent. Unknown, URL/UrlAuth, or failed interactions are surfaced as
+``human_required`` so the caller can notify the user and keep the original
+browser session alive for fallback.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ HAX_AUTO_CONFIRM_BUTTONS = frozenset(
         "confirm,approve,authorize,accept,yes,continue",
     )
 )
+PROGRAMMATIC_BUTTON_TYPES = frozenset({"KeyboardButton", "KeyboardButtonCallback"})
 
 store = PendingOtpStore()
 telegram: TelegramClient | None = None
@@ -123,6 +126,26 @@ def _iter_message_buttons(event: events.NewMessage.Event) -> list[Any]:
     return [button for row in rows for button in (row or [])]
 
 
+def _button_type_name(button: Any) -> str:
+    """Return the underlying Telegram button type without relying on privates.
+
+    Tests may provide a lightweight ``kind`` attribute. Real Telethon
+    ``MessageButton`` objects expose the original TL object through ``button``.
+    """
+    explicit = str(getattr(button, "kind", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    original = getattr(button, "button", None)
+    return type(original).__name__ if original is not None else "unknown"
+
+
+def _is_programmatically_clickable(button: Any) -> bool:
+    kind = _button_type_name(button)
+    if kind in {"text", "callback"}:
+        return True
+    return kind in PROGRAMMATIC_BUTTON_TYPES
+
+
 def _looks_like_hax_confirmation(
     *,
     sender_username: str,
@@ -130,8 +153,23 @@ def _looks_like_hax_confirmation(
     text: str,
     buttons: list[Any],
 ) -> bool:
-    if not buttons or not store.has_active_request(TELEGRAM_ACCOUNT_ID):
+    if not buttons:
         return False
+
+    request = store.active_request(TELEGRAM_ACCOUNT_ID)
+    if request is None:
+        return False
+
+    # Only a request created by the renewal runner may authorize automatic
+    # interaction. ``stage`` is optional for backward compatibility with the
+    # older runner, but an unknown explicit stage fails closed.
+    source = request.context.get("source", "")
+    stage = request.context.get("stage", "")
+    if source and source != "renew-provider":
+        return False
+    if stage not in {"", "login", "renew"}:
+        return False
+
     sender_allowed = (
         sender_username.lower() == HAX_TELEGRAM_BOT.lower()
         or sender_id in HAX_CONFIRMATION_SENDER_IDS
@@ -149,6 +187,15 @@ def _find_auto_confirm_button(buttons: list[Any]) -> Any | None:
         if _normalized_button_text(button) in HAX_AUTO_CONFIRM_BUTTONS
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _mark_human_required(detail: str) -> None:
+    request_id = store.mark_human_required(
+        account=TELEGRAM_ACCOUNT_ID,
+        detail=detail,
+    )
+    if request_id:
+        print(f"[otp-relay] Hax confirmation requires human fallback for {request_id[:8]}…")
 
 
 async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
@@ -176,35 +223,38 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
         return
 
     button = _find_auto_confirm_button(buttons)
-    if HAX_AUTO_CONFIRM and button is not None:
-        try:
-            await button.click()
-        except Exception as error:
-            request_id = store.mark_human_required(
-                account=TELEGRAM_ACCOUNT_ID,
-                detail=f"自动点击 Telegram 确认失败: {type(error).__name__}",
-            )
-            if request_id:
-                print(
-                    "[otp-relay] automatic Hax confirmation failed; "
-                    f"human fallback required for {request_id[:8]}…"
-                )
-            return
-
-        request_id = store.mark_auto_attempted(
-            account=TELEGRAM_ACCOUNT_ID,
-            detail="已尝试自动点击 Telegram 确认，等待 Hax 页面继续",
+    if button is None:
+        _mark_human_required(
+            "检测到 Hax Telegram 确认卡片，但没有唯一的白名单确认按钮"
         )
-        if request_id:
-            print(f"[otp-relay] automatic Hax confirmation attempted for {request_id[:8]}…")
         return
 
-    request_id = store.mark_human_required(
+    if not HAX_AUTO_CONFIRM:
+        _mark_human_required("检测到 Hax Telegram 确认卡片，但自动确认已关闭")
+        return
+
+    if not _is_programmatically_clickable(button):
+        kind = _button_type_name(button)
+        _mark_human_required(
+            "检测到 Hax Telegram 确认卡片，但按钮类型 "
+            f"{kind or 'unknown'} 不能由 Relay 安全自动执行"
+        )
+        return
+
+    try:
+        await button.click()
+    except Exception as error:
+        _mark_human_required(
+            f"自动点击 Telegram 确认失败: {type(error).__name__}"
+        )
+        return
+
+    request_id = store.mark_auto_attempted(
         account=TELEGRAM_ACCOUNT_ID,
-        detail="检测到 Hax Telegram 确认卡片，但按钮不在自动处理白名单",
+        detail="已尝试自动点击 Telegram 确认，等待 Hax 页面继续",
     )
     if request_id:
-        print(f"[otp-relay] Hax confirmation requires human fallback for {request_id[:8]}…")
+        print(f"[otp-relay] automatic Hax confirmation attempted for {request_id[:8]}…")
 
 
 @asynccontextmanager
@@ -279,7 +329,11 @@ def create_request(payload: CreateRequest) -> CreateResponse:
         raise HTTPException(status_code=400, detail="provider must be hax")
     if payload.account.strip() != TELEGRAM_ACCOUNT_ID:
         raise HTTPException(status_code=403, detail="account does not match relay session")
-    request = store.create(payload.account, payload.ttl_seconds)
+    request = store.create(
+        payload.account,
+        payload.ttl_seconds,
+        context=payload.context,
+    )
     return CreateResponse(
         request_id=request.request_id,
         expires_in=max(0, int(request.expires_at - request.created_at)),
