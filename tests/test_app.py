@@ -36,7 +36,7 @@ class HaxOtpRelayAppTests(unittest.TestCase):
 
     def test_readyz_reports_ok_when_client_connected(self):
         with patch.object(relay_app, "telegram", FakeTelegram(connected=True)):
-            self.assertEqual(relay_app.readyz(), {"status": "ok"})
+            self.assertEqual(relay_app.readyz(), {"status": "ready"})
 
 
 if __name__ == "__main__":
