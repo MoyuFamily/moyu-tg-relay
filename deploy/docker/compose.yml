@@ -3,25 +3,37 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
-    image: moyufamily/moyu-tg-relay:latest
-    container_name: moyu-tg-relay
+    image: moyu-tg-relay:local
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    environment:
+      OTP_RELAY_BEARER_TOKEN: ${OTP_RELAY_BEARER_TOKEN:?OTP_RELAY_BEARER_TOKEN is required}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}
+      TELEGRAM_ACCOUNT_ID: ${TELEGRAM_ACCOUNT_ID:?TELEGRAM_ACCOUNT_ID is required}
+      TELEGRAM_SESSION_PATH: /data/telegram.session
+      HAX_TELEGRAM_BOT: ${HAX_TELEGRAM_BOT:-HaxTG_bot}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - moyu-tg-relay-data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
-    ports:
-      - "127.0.0.1:8787:8787"
-    environment:
-      OTP_RELAY_BEARER_TOKEN: "${OTP_RELAY_BEARER_TOKEN}"
-      TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
-      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
-      TELEGRAM_ACCOUNT_ID: "${TELEGRAM_ACCOUNT_ID}"
-      TELEGRAM_SESSION_PATH: /data/telegram.session
-      HAX_TELEGRAM_BOT: "${HAX_TELEGRAM_BOT:-HaxTG_bot}"
-    volumes:
-      - moyu-tg-relay-data:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; r=urlopen('http://127.0.0.1:8787/healthz', timeout=3); raise SystemExit(0 if r.status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   moyu-tg-relay-data:

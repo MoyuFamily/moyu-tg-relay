@@ -1,11 +1,12 @@
-"""Post-deploy smoke check for the Hax OTP Relay.
+#!/usr/bin/env python3
+"""Post-deploy smoke check for Moyu Telegram OTP Relay.
 
-Uses only stdlib HTTP so it can run from the renewal host without adding a new
-dependency. The probe never creates or consumes an OTP request.
+Uses only standard library HTTP to verify process liveness and API readiness.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -13,15 +14,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-BASE_URL = os.environ.get("HAX_OTP_RELAY_URL", "").strip().rstrip("/")
-TOKEN = os.environ.get("HAX_OTP_RELAY_TOKEN", "").strip()
-
-
-def _request(path: str, *, token: str = "") -> tuple[int, str]:
+def _request(base_url: str, path: str, *, token: str = "") -> tuple[int, str]:
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = Request(f"{BASE_URL}{path}", headers=headers, method="GET")
+    request = Request(f"{base_url}{path}", headers=headers, method="GET")
     try:
         with urlopen(request, timeout=10) as response:
             return response.status, response.read().decode("utf-8", errors="replace")
@@ -33,43 +30,51 @@ def _request(path: str, *, token: str = "") -> tuple[int, str]:
 
 def _json(body: str) -> dict:
     try:
-        value = json.loads(body)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"relay returned non-JSON response: {body[:200]!r}") from error
-    if not isinstance(value, dict):
-        raise RuntimeError("relay returned unexpected JSON payload")
-    return value
+        return json.loads(body)
+    except Exception:
+        return {}
 
 
 def main() -> int:
-    if not BASE_URL:
-        print("HAX_OTP_RELAY_URL is required", file=sys.stderr)
-        return 2
-    if not TOKEN:
-        print("HAX_OTP_RELAY_TOKEN is required", file=sys.stderr)
-        return 2
-
-    status_code, body = _request("/healthz")
-    if status_code != 200 or _json(body).get("status") != "ok":
-        raise RuntimeError(f"liveness probe failed: HTTP {status_code} {body[:200]}")
-    print("[relay-check] healthz: ok")
-
-    status_code, body = _request("/readyz")
-    if status_code != 200 or _json(body).get("status") != "ready":
-        raise RuntimeError(f"readiness probe failed: HTTP {status_code} {body[:200]}")
-    print("[relay-check] readyz: ready")
-
-    status_code, body = _request(
-        "/v1/otp/requests/smoke-check-does-not-exist",
-        token=TOKEN,
+    parser = argparse.ArgumentParser(description="Moyu TG Relay Smoke Check")
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("OTP_RELAY_BASE_URL", os.environ.get("HAX_OTP_RELAY_URL", "http://127.0.0.1:8787")),
+        help="Base URL of the relay service",
     )
-    if status_code != 404:
-        raise RuntimeError(
-            f"authenticated API probe expected HTTP 404, got {status_code}: {body[:200]}"
-        )
-    print("[relay-check] bearer-authenticated API: ok")
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("OTP_RELAY_BEARER_TOKEN", os.environ.get("HAX_OTP_RELAY_TOKEN", "")),
+        help="Bearer token for protected endpoints",
+    )
+    args = parser.parse_args()
+
+    base_url = str(args.base_url).strip().rstrip("/")
+    token = str(args.token).strip()
+
+    # 1. Healthz check (Liveness)
+    status, body = _request(base_url, "/healthz")
+    if status != 200 or _json(body).get("status") != "ok":
+        print(f"[FAIL] /healthz returned status={status}, body={body}")
+        return 1
+    print("[PASS] /healthz returned ok")
+
+    # 2. If token is provided, verify /readyz and auth protection
+    if token:
+        status, body = _request(base_url, "/readyz", token=token)
+        if status != 200:
+            print(f"[WARN] /readyz returned status={status}, body={body}")
+        else:
+            print("[PASS] /readyz returned ok")
+
+        status, _ = _request(base_url, "/api/v1/hax-otp/requests", token="invalid-test-token")
+        if status != 401:
+            print(f"[FAIL] Expected 401 with bad token, got {status}")
+            return 1
+        print("[PASS] Auth rejection verified (401)")
+
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

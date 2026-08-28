@@ -1,20 +1,35 @@
 [Unit]
-Description=Moyu Telegram OTP Relay Service
-After=network.target
+Description=Moyu Telegram OTP Relay
+Documentation=https://github.com/MoyuFamily/moyu-tg-relay
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=relay
-Group=relay
+User=moyu-tg-relay
+Group=moyu-tg-relay
 WorkingDirectory=/opt/moyu-tg-relay
 EnvironmentFile=/etc/moyu-tg-relay.env
-Environment=PYTHONPATH=/opt/moyu-tg-relay/src
-ExecStart=/opt/moyu-tg-relay/venv/bin/uvicorn moyu_tg_relay.app:app --host 127.0.0.1 --port 8787
-Restart=always
-RestartSec=5
+ExecStart=/opt/moyu-tg-relay/.venv/bin/python -m uvicorn moyu_tg_relay.app:app --host 127.0.0.1 --port 8787 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+KillSignal=SIGINT
+UMask=0077
+
 NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/lib/moyu-tg-relay
 
 [Install]
