@@ -53,6 +53,16 @@ class HaxOtpRelayStoreTests(unittest.TestCase):
         self.assertEqual(store.get(request.request_id).status, "expired")
         self.assertEqual(store.attach_code(account="123", code="12345678"), "")
 
+    def test_terminal_requests_are_pruned_after_retention_window(self):
+        clock = FakeClock()
+        store = PendingOtpStore(clock=clock)
+        request = store.create("123", 60)
+        store.cancel(request.request_id)
+
+        clock.value += 60 + 600 + 1
+        with self.assertRaises(KeyError):
+            store.get(request.request_id)
+
 
 if __name__ == "__main__":
     unittest.main()
