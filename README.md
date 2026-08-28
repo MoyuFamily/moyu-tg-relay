@@ -1,13 +1,13 @@
-# 🐟 Moyu Telegram OTP Relay (`moyu-tg-relay`)
+# 🐟 Moyu Telegram Interaction Relay (`moyu-tg-relay`)
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Compose_Ready-2496ED.svg)](deploy/docker/compose.yml)
-[![systemd Hardened](https://img.shields.io/badge/systemd-Hardened-success.svg)](deploy/systemd/moyu-tg-relay.service)
+[![systemd](https://img.shields.io/badge/systemd-Hardened-success.svg)](deploy/systemd/moyu-tg-relay.service)
 
-> **轻量、安全、生产加固的 Telegram 2FA / OTP 验证码中继微服务。**
+> **轻量、安全、生产加固的 Telegram verification / confirmation 中继服务。**
 >
-> *自动化登录场景下多账户验证码的高隔离、一次性消费与零特权安全中继。*
+> Relay 长期持有 Telethon Session，为 `moyu-renew` 提供一次性 OTP、受限自动确认，以及自动失败后的可恢复人工 fallback 信号。
 
 ---
 
@@ -18,14 +18,97 @@
   - Swagger / OpenAPI / ReDoc 默认关闭；
   - systemd 沙箱与 Docker `read_only + cap_drop: ALL`；
   - Telethon Session 永远留在 Relay VPS，不进入 GitHub Actions。
-- ⚡ **短生命周期 OTP 状态**：
+- ⚡ **短生命周期交互状态**：
   - 单 Telegram 账号只有一个 active request；
   - TTL、一次性 consume、终态自动回收；
-  - sender 与 Telegram Account ID 双重约束。
+  - sender、Telegram Account ID 与 Hax message marker 多重约束。
+- 🤖 **安全自动确认**：
+  - 仅当前存在唯一 active Hax request 时工作；
+  - sender、Hax marker 与 button text 必须同时命中白名单；
+  - 只允许单一、无歧义的 allow-listed confirmation button；
+  - 任何未知按钮、歧义或点击异常都 fail-closed 到 `human_required`。
+- 🧩 **Human fallback**：
+  - Relay 不负责通知用户；只向 caller 暴露 `human_required`；
+  - `moyu-renew` 根据已配置渠道实时通知飞书 / Telegram Bot / 其他渠道，并保持原浏览器会话等待用户手机操作。
 - 🐳 **双模部署**：
   - Docker Compose：named volume 持久化 Session，`/readyz` 作为容器健康检查；
   - systemd：代码 root-owned，仅 `/var/lib/moyu-tg-relay` 可持久写入。
 - 🧭 **引导式部署**：自动生成 Bearer Token、完成 Session bootstrap、提取并回填 `TELEGRAM_ACCOUNT_ID`、启动服务并执行完整 smoke check。
+
+---
+
+## 🔄 Interaction State Machine
+
+```text
+moyu-renew 创建 active request
+            ↓
+Telegram incoming message
+            ↓
+┌───────────────────────────────┐
+│ OTP code                      │
+│   → ready → consume once      │
+├───────────────────────────────┤
+│ allow-listed confirmation     │
+│   → click                     │
+│   → auto_attempted            │
+├───────────────────────────────┤
+│ unknown / unsafe / click fail │
+│   → human_required            │
+└───────────────────────────────┘
+```
+
+完整状态：
+
+```text
+pending
+  尚未收到可处理 Telegram 交互
+
+auto_attempted
+  Relay 已尝试自动确认，caller 应给目标网页一个短 grace period
+
+human_required
+  无法安全自动完成，caller 应通知用户并保持原任务上下文等待
+
+ready
+  OTP 已就绪，可以一次性 consume
+
+consumed / expired / cancelled
+  terminal
+```
+
+OTP 在 `auto_attempted` / `human_required` 之后仍可到达并把 request 转成 `ready`，因此用户手机完成 fallback 后不需要创建第二个 request。
+
+---
+
+## 🛡️ Auto-confirm Safety Policy
+
+默认配置：
+
+```text
+HAX_AUTO_CONFIRM=true
+HAX_CONFIRMATION_SENDER_IDS=777000
+HAX_CONFIRMATION_MARKERS=hax.co.id,hax
+HAX_AUTO_CONFIRM_BUTTONS=confirm,approve,authorize,accept,yes,continue
+```
+
+自动点击必须同时满足：
+
+1. 当前 `TELEGRAM_ACCOUNT_ID` 恰好只有一个 active Hax request；
+2. sender 为配置的 Hax Bot username，或 sender ID 命中 `HAX_CONFIRMATION_SENDER_IDS`；
+3. message text 命中 `HAX_CONFIRMATION_MARKERS`；
+4. message 中恰好有一个按钮的 normalized text 命中 `HAX_AUTO_CONFIRM_BUTTONS`。
+
+**Relay 不会实现“看到 Telegram 里的 Confirm 就点击”的通用逻辑。**
+
+如果 Hax/Telegram 的真实确认消息格式发生变化，优先更新 sender / marker / button allow-list；不要放宽成全局自动点击。
+
+如果不希望 Relay 自动点击，可以：
+
+```text
+HAX_AUTO_CONFIRM=false
+```
+
+此时匹配到 confirmation card 会直接进入 `human_required`。
 
 ---
 
@@ -65,7 +148,7 @@ sudo ./deploy/install.sh systemd
 
 脚本是幂等入口：已有有效 Session 与 `TELEGRAM_ACCOUNT_ID` 时会直接复用，不会每次重新登录 Telegram。
 
-> Relay 只监听 `127.0.0.1:8787`。远程 `moyu-renew` 应通过 Caddy/Nginx/Traefik 暴露 **HTTPS**，不要把 8787 明文端口直接开放到公网。向导完成后可输入域名获取对应 Caddy snippet。
+> Relay 只监听 `127.0.0.1:8787`。远程 `moyu-renew` 应通过 Caddy/Nginx/Traefik 暴露 **HTTPS**，不要把 8787 明文端口直接开放到公网。
 
 手工部署与排障文档见 [deploy/README.md](deploy/README.md)。
 
@@ -83,7 +166,6 @@ python3 smoke_check.py --base-url http://127.0.0.1:8787
 
 ```bash
 # Docker：脚本会自动在容器内部执行，无需把 Token 放到命令历史。
-
 docker compose --env-file .env -f deploy/docker/compose.yml exec -T moyu-tg-relay \
   python /app/smoke_check.py --base-url http://127.0.0.1:8787
 
@@ -108,8 +190,49 @@ HAX_OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
 
 Telegram API ID / Hash 和 `.session` 不应进入 `moyu-renew` 或 GitHub Actions。
 
+`moyu-renew` 负责：
+
+```text
+auto_attempted
+  → 给网页 grace period
+  → 页面继续则无感运行
+
+human_required
+  → 通过所有已配置通知渠道即时提醒
+  → 保持 Selenium session
+  → 用户手机确认后继续同一 Action
+  → 超时才 action_required
+```
+
+Relay **不决定使用飞书还是 Telegram Bot 通知**，通知渠道属于 `moyu-renew` 的职责。
+
+---
+
+## HTTP Contract
+
+```text
+GET    /healthz
+GET    /readyz
+POST   /v1/otp/requests
+GET    /v1/otp/requests/{request_id}
+POST   /v1/otp/requests/{request_id}/consume
+DELETE /v1/otp/requests/{request_id}
+```
+
+`GET /v1/otp/requests/{request_id}` 返回：
+
+```json
+{
+  "request_id": "...",
+  "status": "pending | auto_attempted | human_required | ready | consumed | expired | cancelled",
+  "detail": ""
+}
+```
+
+`detail` 只提供可安全暴露的状态说明，不返回 OTP。OTP 只允许在 `ready` 后通过 `consume` 返回一次。
+
 ---
 
 ## 📄 开源协议
 
-本项目基于 [MIT License](LICENSE) 开源。
+基于 [MIT License](LICENSE)。
