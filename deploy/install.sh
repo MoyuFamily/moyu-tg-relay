@@ -233,6 +233,7 @@ run_docker() {
   local compose_file="${ROOT_DIR}/deploy/docker/compose.yml"
   ensure_config_file "$env_file" "${ROOT_DIR}/.env.example"
   configure_common_env "$env_file"
+  chmod 0600 "$env_file"
 
   local -a compose=(docker compose --env-file "$env_file" -f "$compose_file")
   log "validating Compose configuration"
@@ -279,8 +280,8 @@ run_docker() {
   log "starting Relay container"
   "${compose[@]}" up -d
 
-  local attempt=0
-  for attempt in $(seq 1 12); do
+  local attempt=1
+  while (( attempt <= 12 )); do
     if "${compose[@]}" exec -T "$SERVICE_NAME" \
       python /app/smoke_check.py --base-url "$LOCAL_URL" >/dev/null 2>&1; then
       "${compose[@]}" exec -T "$SERVICE_NAME" \
@@ -289,6 +290,7 @@ run_docker() {
       return 0
     fi
     sleep 5
+    ((attempt += 1))
   done
 
   "${compose[@]}" logs --tail=80 "$SERVICE_NAME" >&2 || true
@@ -301,7 +303,7 @@ ensure_system_user() {
   fi
   local nologin_shell="/usr/sbin/nologin"
   [[ -x "$nologin_shell" ]] || nologin_shell="/sbin/nologin"
-  useradd --system --home-dir "$STATE_DIR" --shell "$nologin_shell" "$SERVICE_NAME"
+  useradd --system --user-group --home-dir "$STATE_DIR" --shell "$nologin_shell" "$SERVICE_NAME"
 }
 
 copy_systemd_release() {
@@ -341,6 +343,9 @@ run_systemd() {
   fi
   "${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip
   "${INSTALL_DIR}/.venv/bin/pip" install --upgrade "$INSTALL_DIR"
+  # The installer keeps a restrictive umask for secrets, but the service user
+  # must still be able to traverse/read the root-owned code and virtualenv.
+  chmod -R a+rX,go-w "$INSTALL_DIR"
 
   ensure_config_file "$SYSTEMD_ENV" "${INSTALL_DIR}/deploy/systemd/moyu-tg-relay.env.example"
   env_set "$SYSTEMD_ENV" TELEGRAM_SESSION_PATH "${STATE_DIR}/telegram.session"
@@ -386,8 +391,8 @@ run_systemd() {
   systemctl enable moyu-tg-relay.service >/dev/null
   systemctl restart moyu-tg-relay.service
 
-  local attempt=0
-  for attempt in $(seq 1 12); do
+  local attempt=1
+  while (( attempt <= 12 )); do
     if "${INSTALL_DIR}/.venv/bin/python" "${INSTALL_DIR}/smoke_check.py" \
       --base-url "$LOCAL_URL" --env-file "$SYSTEMD_ENV" >/dev/null 2>&1; then
       "${INSTALL_DIR}/.venv/bin/python" "${INSTALL_DIR}/smoke_check.py" \
@@ -396,6 +401,7 @@ run_systemd() {
       return 0
     fi
     sleep 5
+    ((attempt += 1))
   done
 
   systemctl status moyu-tg-relay.service --no-pager >&2 || true
