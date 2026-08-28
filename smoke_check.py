@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Post-deploy smoke check for Moyu Telegram OTP Relay.
 
-Uses only standard library HTTP to verify process liveness and API readiness.
+Uses only standard library HTTP to verify process liveness, Telegram readiness,
+and Bearer-token rejection without creating or consuming OTP requests.
 """
 
 from __future__ import annotations
@@ -52,22 +53,26 @@ def main() -> int:
     base_url = str(args.base_url).strip().rstrip("/")
     token = str(args.token).strip()
 
-    # 1. Healthz check (Liveness)
     status, body = _request(base_url, "/healthz")
     if status != 200 or _json(body).get("status") != "ok":
         print(f"[FAIL] /healthz returned status={status}, body={body}")
         return 1
     print("[PASS] /healthz returned ok")
 
-    # 2. If token is provided, verify /readyz and auth protection
     if token:
         status, body = _request(base_url, "/readyz", token=token)
-        if status != 200:
-            print(f"[WARN] /readyz returned status={status}, body={body}")
-        else:
-            print("[PASS] /readyz returned ok")
+        if status != 200 or _json(body).get("status") != "ready":
+            print(f"[FAIL] /readyz returned status={status}, body={body}")
+            return 1
+        print("[PASS] /readyz returned ready")
 
-        status, _ = _request(base_url, "/api/v1/hax-otp/requests", token="invalid-test-token")
+        # Use an existing protected GET route with a dummy request id. An invalid
+        # token is rejected by the dependency before the handler reaches store.get().
+        status, _ = _request(
+            base_url,
+            "/v1/otp/requests/smoke-check",
+            token="invalid-test-token",
+        )
         if status != 401:
             print(f"[FAIL] Expected 401 with bad token, got {status}")
             return 1
