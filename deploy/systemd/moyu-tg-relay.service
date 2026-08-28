@@ -1,0 +1,21 @@
+[Unit]
+Description=Moyu Telegram OTP Relay Service
+After=network.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+WorkingDirectory=/opt/moyu-tg-relay
+EnvironmentFile=/etc/moyu-tg-relay.env
+Environment=PYTHONPATH=/opt/moyu-tg-relay/src
+ExecStart=/opt/moyu-tg-relay/venv/bin/uvicorn moyu_tg_relay.app:app --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/moyu-tg-relay
+
+[Install]
+WantedBy=multi-user.target

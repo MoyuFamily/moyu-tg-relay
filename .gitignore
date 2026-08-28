@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# State & session
+*.session
+*.session-journal
+.state/
+*.tmp
+*.log
+
+# Environments
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store

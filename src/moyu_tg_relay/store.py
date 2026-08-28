@@ -1,0 +1,135 @@
+"""In-memory short-lived OTP request store for the Hax Telegram relay."""
+
+from __future__ import annotations
+
+import re
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+
+
+CODE_PATTERN = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
+CODE_HINTS = ("verification", "verify", "code", "renew")
+TERMINAL_STATUSES = frozenset({"consumed", "expired", "cancelled"})
+
+
+@dataclass
+class PendingOtp:
+    request_id: str
+    account: str
+    created_at: float
+    expires_at: float
+    status: str = "pending"
+    code: str = ""
+
+
+def extract_hax_verification_code(text: str) -> str:
+    """Extract one plausible Hax verification code from a Telegram message.
+
+    This deliberately fails closed when the message is unrelated or contains
+    multiple numeric candidates. The relay never attempts to interpret image or
+    CAPTCHA challenges from the Hax website.
+    """
+    normalized = " ".join(str(text or "").split())
+    lower = normalized.lower()
+    if not normalized or not any(hint in lower for hint in CODE_HINTS):
+        return ""
+    candidates = list(dict.fromkeys(CODE_PATTERN.findall(normalized)))
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+class PendingOtpStore:
+    """Thread-safe TTL store with one active request per Telegram account."""
+
+    def __init__(self, *, clock=time.time) -> None:
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._items: dict[str, PendingOtp] = {}
+
+    def _expire_locked(self) -> None:
+        now = self._clock()
+        for item in self._items.values():
+            if item.status in {"pending", "ready"} and now >= item.expires_at:
+                item.status = "expired"
+                item.code = ""
+
+    def create(self, account: str, ttl_seconds: int = 300) -> PendingOtp:
+        normalized_account = str(account or "").strip()
+        if not normalized_account:
+            raise ValueError("account is required")
+        ttl = max(60, min(int(ttl_seconds), 600))
+        with self._lock:
+            self._expire_locked()
+            # A Telegram account can only have one current Hax verification
+            # request. Cancelling the previous one removes message ambiguity.
+            for item in self._items.values():
+                if (
+                    item.account == normalized_account
+                    and item.status in {"pending", "ready"}
+                ):
+                    item.status = "cancelled"
+                    item.code = ""
+            now = self._clock()
+            request = PendingOtp(
+                request_id=secrets.token_urlsafe(24),
+                account=normalized_account,
+                created_at=now,
+                expires_at=now + ttl,
+            )
+            self._items[request.request_id] = request
+            return request
+
+    def get(self, request_id: str) -> PendingOtp:
+        with self._lock:
+            self._expire_locked()
+            try:
+                return self._items[str(request_id)]
+            except KeyError as error:
+                raise KeyError("unknown request_id") from error
+
+    def attach_code(self, *, account: str, code: str) -> str:
+        normalized_account = str(account or "").strip()
+        normalized_code = str(code or "").strip()
+        if not normalized_account or not CODE_PATTERN.fullmatch(normalized_code):
+            return ""
+        with self._lock:
+            self._expire_locked()
+            candidates = [
+                item
+                for item in self._items.values()
+                if item.account == normalized_account and item.status == "pending"
+            ]
+            if len(candidates) != 1:
+                return ""
+            item = candidates[0]
+            item.code = normalized_code
+            item.status = "ready"
+            return item.request_id
+
+    def consume(self, request_id: str) -> str:
+        with self._lock:
+            item = self.get(request_id)
+            if item.status != "ready" or not item.code:
+                raise ValueError(f"request is not ready: {item.status}")
+            code = item.code
+            item.code = ""
+            item.status = "consumed"
+            return code
+
+    def cancel(self, request_id: str) -> None:
+        with self._lock:
+            item = self.get(request_id)
+            if item.status not in TERMINAL_STATUSES:
+                item.status = "cancelled"
+                item.code = ""
+
+
+__all__ = [
+    "PendingOtp",
+    "PendingOtpStore",
+    "extract_hax_verification_code",
+]
+
+
+extract_verification_code = extract_hax_verification_code
