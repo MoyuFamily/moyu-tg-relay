@@ -34,6 +34,8 @@ jobs:
           bash -n deploy/install.sh
           bash deploy/install.sh --help | grep -F 'Moyu Telegram Relay guided deployment'
           test -x deploy/install.sh
+          grep -F 'chmod 0600 "$env_file"' deploy/install.sh
+          grep -F 'chmod -R a+rX,go-w "$INSTALL_DIR"' deploy/install.sh
           test ! -e deploy/docker/env.example
       - name: Validate Compose configuration
         run: |
