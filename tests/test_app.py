@@ -24,18 +24,18 @@ class HaxOtpRelayAppTests(unittest.TestCase):
         self.assertEqual(relay_app.healthz(), {"status": "ok"})
 
     def test_readyz_reports_503_when_client_missing_or_disconnected(self):
-        with patch.object(relay_app, "telegram_client", None):
+        with patch.object(relay_app, "telegram", None):
             with self.assertRaises(HTTPException) as ctx:
                 relay_app.readyz()
             self.assertEqual(ctx.exception.status_code, 503)
 
-        with patch.object(relay_app, "telegram_client", FakeTelegram(connected=False)):
+        with patch.object(relay_app, "telegram", FakeTelegram(connected=False)):
             with self.assertRaises(HTTPException) as ctx:
                 relay_app.readyz()
             self.assertEqual(ctx.exception.status_code, 503)
 
     def test_readyz_reports_ok_when_client_connected(self):
-        with patch.object(relay_app, "telegram_client", FakeTelegram(connected=True)):
+        with patch.object(relay_app, "telegram", FakeTelegram(connected=True)):
             self.assertEqual(relay_app.readyz(), {"status": "ok"})
 
 
