@@ -6,7 +6,8 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 
 CODE_PATTERN = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
@@ -25,6 +26,7 @@ class PendingOtp:
     status: str = "pending"
     code: str = ""
     detail: str = ""
+    context: dict[str, str] = field(default_factory=dict)
 
 
 def extract_hax_verification_code(text: str) -> str:
@@ -40,6 +42,18 @@ def extract_hax_verification_code(text: str) -> str:
         return ""
     candidates = list(dict.fromkeys(CODE_PATTERN.findall(normalized)))
     return candidates[0] if len(candidates) == 1 else ""
+
+
+def _normalize_context(context: Mapping[str, Any] | None) -> dict[str, str]:
+    if not isinstance(context, Mapping):
+        return {}
+    normalized: dict[str, str] = {}
+    for key, value in context.items():
+        normalized_key = str(key or "").strip()[:64]
+        if not normalized_key:
+            continue
+        normalized[normalized_key] = str(value or "").strip()[:300]
+    return normalized
 
 
 class PendingOtpStore:
@@ -66,7 +80,12 @@ class PendingOtpStore:
         for request_id in stale_request_ids:
             del self._items[request_id]
 
-    def create(self, account: str, ttl_seconds: int = 300) -> PendingOtp:
+    def create(
+        self,
+        account: str,
+        ttl_seconds: int = 300,
+        context: Mapping[str, Any] | None = None,
+    ) -> PendingOtp:
         normalized_account = str(account or "").strip()
         if not normalized_account:
             raise ValueError("account is required")
@@ -86,6 +105,7 @@ class PendingOtpStore:
                 account=normalized_account,
                 created_at=now,
                 expires_at=now + ttl,
+                context=_normalize_context(context),
             )
             self._items[request.request_id] = request
             return request
@@ -106,10 +126,15 @@ class PendingOtpStore:
             if item.account == normalized_account and item.status in ACTIVE_STATUSES
         ]
 
-    def has_active_request(self, account: str) -> bool:
+    def active_request(self, account: str) -> PendingOtp | None:
+        """Return the sole active interaction for an account, if unambiguous."""
         with self._lock:
             self._expire_locked()
-            return len(self._active_for_account_locked(account)) == 1
+            candidates = self._active_for_account_locked(account)
+            return candidates[0] if len(candidates) == 1 else None
+
+    def has_active_request(self, account: str) -> bool:
+        return self.active_request(account) is not None
 
     def mark_auto_attempted(self, *, account: str, detail: str = "") -> str:
         with self._lock:
