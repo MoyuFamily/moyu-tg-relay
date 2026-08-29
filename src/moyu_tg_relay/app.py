@@ -1,7 +1,14 @@
-"""FastAPI + Telethon service that relays Hax verification codes.
+"""FastAPI + Telethon service that relays Hax verification interactions.
 
 Run this service on an independent private VPS. The Telethon session remains on
 that VPS and is never passed to GitHub Actions or committed to this repository.
+
+Besides one-time verification codes, the relay can recognize tightly-scoped Hax
+Telegram confirmation cards. It attempts only explicitly allow-listed buttons
+that Telethon can actually execute without opening a browser or requesting extra
+user consent. Unknown, URL/UrlAuth, or failed interactions are surfaced as
+``human_required`` so the caller can notify the user and keep the original
+browser session alive for fallback.
 """
 
 from __future__ import annotations
@@ -26,6 +33,33 @@ TELEGRAM_SESSION_PATH = os.environ.get(
 ).strip()
 TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
 HAX_TELEGRAM_BOT = os.environ.get("HAX_TELEGRAM_BOT", "HaxTG_bot").strip().lstrip("@")
+HAX_AUTO_CONFIRM = os.environ.get("HAX_AUTO_CONFIRM", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def _csv_values(name: str, default: str) -> tuple[str, ...]:
+    raw = os.environ.get(name, default)
+    return tuple(item.strip() for item in str(raw or "").split(",") if item.strip())
+
+
+HAX_CONFIRMATION_SENDER_IDS = frozenset(
+    item for item in _csv_values("HAX_CONFIRMATION_SENDER_IDS", "777000") if item.isdigit()
+)
+HAX_CONFIRMATION_MARKERS = tuple(
+    item.lower() for item in _csv_values("HAX_CONFIRMATION_MARKERS", "hax.co.id,hax")
+)
+HAX_AUTO_CONFIRM_BUTTONS = frozenset(
+    item.lower()
+    for item in _csv_values(
+        "HAX_AUTO_CONFIRM_BUTTONS",
+        "confirm,approve,authorize,accept,yes,continue",
+    )
+)
+PROGRAMMATIC_BUTTON_TYPES = frozenset({"KeyboardButton", "KeyboardButtonCallback"})
 
 store = PendingOtpStore()
 telegram: TelegramClient | None = None
@@ -46,6 +80,7 @@ class CreateResponse(BaseModel):
 class StatusResponse(BaseModel):
     request_id: str
     status: str
+    detail: str = ""
 
 
 class ConsumeResponse(BaseModel):
@@ -82,17 +117,144 @@ def _telegram_ready() -> bool:
         return False
 
 
+def _normalized_button_text(button: Any) -> str:
+    return " ".join(str(getattr(button, "text", "") or "").lower().split())
+
+
+def _iter_message_buttons(event: events.NewMessage.Event) -> list[Any]:
+    rows = getattr(event, "buttons", None) or []
+    return [button for row in rows for button in (row or [])]
+
+
+def _button_type_name(button: Any) -> str:
+    """Return the underlying Telegram button type without relying on privates.
+
+    Tests may provide a lightweight ``kind`` attribute. Real Telethon
+    ``MessageButton`` objects expose the original TL object through ``button``.
+    """
+    explicit = str(getattr(button, "kind", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    original = getattr(button, "button", None)
+    return type(original).__name__ if original is not None else "unknown"
+
+
+def _is_programmatically_clickable(button: Any) -> bool:
+    kind = _button_type_name(button)
+    if kind in {"text", "callback"}:
+        return True
+    return kind in PROGRAMMATIC_BUTTON_TYPES
+
+
+def _looks_like_hax_confirmation(
+    *,
+    sender_username: str,
+    sender_id: str,
+    text: str,
+    buttons: list[Any],
+) -> bool:
+    if not buttons:
+        return False
+
+    request = store.active_request(TELEGRAM_ACCOUNT_ID)
+    if request is None:
+        return False
+
+    # Only a request created by the renewal runner may authorize automatic
+    # interaction. ``stage`` is optional for backward compatibility with the
+    # older runner, but an unknown explicit stage fails closed.
+    source = request.context.get("source", "")
+    stage = request.context.get("stage", "")
+    if source and source != "renew-provider":
+        return False
+    if stage not in {"", "login", "renew"}:
+        return False
+
+    sender_allowed = (
+        sender_username.lower() == HAX_TELEGRAM_BOT.lower()
+        or sender_id in HAX_CONFIRMATION_SENDER_IDS
+    )
+    if not sender_allowed:
+        return False
+    normalized = " ".join(str(text or "").lower().split())
+    return any(marker in normalized for marker in HAX_CONFIRMATION_MARKERS)
+
+
+def _find_auto_confirm_button(buttons: list[Any]) -> Any | None:
+    matches = [
+        button
+        for button in buttons
+        if _normalized_button_text(button) in HAX_AUTO_CONFIRM_BUTTONS
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _mark_human_required(detail: str) -> None:
+    request_id = store.mark_human_required(
+        account=TELEGRAM_ACCOUNT_ID,
+        detail=detail,
+    )
+    if request_id:
+        print(f"[otp-relay] Hax confirmation requires human fallback for {request_id[:8]}…")
+
+
 async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
     sender = await event.get_sender()
     sender_username = str(getattr(sender, "username", "") or "").lower()
-    if sender_username != HAX_TELEGRAM_BOT.lower():
+    sender_id = str(getattr(sender, "id", "") or "")
+    text = str(getattr(event, "raw_text", "") or "")
+
+    # Normal Hax OTP messages are still the primary machine-readable path.
+    if sender_username == HAX_TELEGRAM_BOT.lower():
+        code = extract_hax_verification_code(text)
+        if code:
+            request_id = store.attach_code(account=TELEGRAM_ACCOUNT_ID, code=code)
+            if request_id:
+                print(f"[otp-relay] Hax verification code attached to {request_id[:8]}…")
+            return
+
+    buttons = _iter_message_buttons(event)
+    if not _looks_like_hax_confirmation(
+        sender_username=sender_username,
+        sender_id=sender_id,
+        text=text,
+        buttons=buttons,
+    ):
         return
-    code = extract_hax_verification_code(event.raw_text)
-    if not code:
+
+    button = _find_auto_confirm_button(buttons)
+    if button is None:
+        _mark_human_required(
+            "检测到 Hax Telegram 确认卡片，但没有唯一的白名单确认按钮"
+        )
         return
-    request_id = store.attach_code(account=TELEGRAM_ACCOUNT_ID, code=code)
+
+    if not HAX_AUTO_CONFIRM:
+        _mark_human_required("检测到 Hax Telegram 确认卡片，但自动确认已关闭")
+        return
+
+    if not _is_programmatically_clickable(button):
+        kind = _button_type_name(button)
+        _mark_human_required(
+            "检测到 Hax Telegram 确认卡片，但按钮类型 "
+            f"{kind or 'unknown'} 不能由 Relay 安全自动执行"
+        )
+        return
+
+    try:
+        await button.click()
+    except Exception as error:
+        _mark_human_required(
+            f"自动点击 Telegram 确认失败: {type(error).__name__}"
+        )
+        return
+
+    request_id = store.mark_auto_attempted(
+        account=TELEGRAM_ACCOUNT_ID,
+        detail="已尝试自动点击 Telegram 确认，等待 Hax 页面继续",
+    )
     if request_id:
-        print(f"[otp-relay] Hax verification code attached to {request_id[:8]}…")
+        print(f"[otp-relay] automatic Hax confirmation attempted for {request_id[:8]}…")
 
 
 @asynccontextmanager
@@ -119,7 +281,10 @@ async def lifespan(_app: FastAPI):
             "TELEGRAM_ACCOUNT_ID does not match the authorised Telegram session"
         )
     telegram.add_event_handler(_handle_telegram_message, events.NewMessage(incoming=True))
-    print(f"[otp-relay] Telegram session ready; Hax bot=@{HAX_TELEGRAM_BOT}")
+    print(
+        f"[otp-relay] Telegram session ready; Hax bot=@{HAX_TELEGRAM_BOT}; "
+        f"auto-confirm={'on' if HAX_AUTO_CONFIRM else 'off'}"
+    )
     try:
         yield
     finally:
@@ -145,7 +310,7 @@ def healthz() -> dict[str, str]:
 
 @app.get("/readyz")
 def readyz() -> dict[str, str]:
-    """Readiness probe: the relay is connected to Telegram and can receive OTPs."""
+    """Readiness probe: the relay is connected to Telegram and can receive interactions."""
     if not _telegram_ready():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -164,7 +329,11 @@ def create_request(payload: CreateRequest) -> CreateResponse:
         raise HTTPException(status_code=400, detail="provider must be hax")
     if payload.account.strip() != TELEGRAM_ACCOUNT_ID:
         raise HTTPException(status_code=403, detail="account does not match relay session")
-    request = store.create(payload.account, payload.ttl_seconds)
+    request = store.create(
+        payload.account,
+        payload.ttl_seconds,
+        context=payload.context,
+    )
     return CreateResponse(
         request_id=request.request_id,
         expires_in=max(0, int(request.expires_at - request.created_at)),
@@ -181,7 +350,11 @@ def request_status(request_id: str) -> StatusResponse:
         request = store.get(request_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="request not found") from error
-    return StatusResponse(request_id=request.request_id, status=request.status)
+    return StatusResponse(
+        request_id=request.request_id,
+        status=request.status,
+        detail=request.detail,
+    )
 
 
 @app.post(
