@@ -119,8 +119,14 @@ HAX_AUTO_CONFIRM=false
 ```bash
 git clone https://github.com/MoyuFamily/moyu-tg-relay.git
 cd moyu-tg-relay
+
+# 启动统一交互式管理控制台
+python3 -m scripts.manager
+
+# 或直接执行自动化部署向导
 ./deploy/install.sh
 ```
+
 
 如果 Docker Compose 和 systemd 都可用，向导会让你选择部署方式。也可以直接指定：
 
