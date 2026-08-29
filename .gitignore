@@ -18,9 +18,16 @@ venv/
 .venv/
 ENV/
 
+# Distribution / packaging / testing
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 .DS_Store
+
