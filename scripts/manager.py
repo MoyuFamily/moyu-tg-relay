@@ -59,6 +59,39 @@ def load_env_map() -> dict[str, str]:
     return env_map
 
 
+def find_session_files(env_map: dict[str, str]) -> list[Path]:
+    """Discover existing Telegram Session files across environment variables and standard paths."""
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    # 1. Explicit path from .env or os.environ
+    explicit_path = env_map.get("TELEGRAM_SESSION_PATH") or os.environ.get("TELEGRAM_SESSION_PATH")
+    if explicit_path:
+        p = Path(explicit_path).expanduser()
+        if not p.is_absolute():
+            p = ROOT / p
+        if p.is_file() and str(p.resolve()) not in seen:
+            seen.add(str(p.resolve()))
+            found.append(p)
+
+    # 2. Standard search directories
+    search_dirs = [ROOT / ".state", ROOT, ROOT / "deploy", Path("/var/lib/moyu-tg-relay"), Path("/data")]
+    for d in search_dirs:
+        try:
+            if d.is_dir():
+                for sf in d.glob("*.session"):
+                    if sf.is_file() and str(sf.resolve()) not in seen:
+                        seen.add(str(sf.resolve()))
+                        found.append(sf)
+            elif d.is_file() and d.suffix == ".session" and str(d.resolve()) not in seen:
+                seen.add(str(d.resolve()))
+                found.append(d)
+        except Exception:
+            pass
+
+    return found
+
+
 def handle_env_check() -> None:
     print(f"\n{ConsoleStyle.BOLD}📋 本地环境与配置状态检查:{ConsoleStyle.RESET}")
     env_map = load_env_map()
@@ -87,11 +120,21 @@ def handle_env_check() -> None:
             print(f"  ❌ {ConsoleStyle.BOLD}{key:<26}{ConsoleStyle.RESET} [{status}] {desc}")
 
     # Check session file if present
-    session_files = list(ROOT.glob("*.session")) + list((ROOT / "deploy").glob("*.session"))
+    session_files = find_session_files(env_map)
     if session_files:
-        print(f"\n  📂 检测到 Telegram Session 文件: {', '.join(f.name for f in session_files)}")
+        details = []
+        for sf in session_files:
+            try:
+                rel = sf.relative_to(ROOT)
+                path_str = str(rel)
+            except ValueError:
+                path_str = str(sf)
+            size_kb = sf.stat().st_size / 1024.0
+            details.append(f"{path_str} ({size_kb:.1f} KB)")
+        print(f"\n  📂 检测到 Telegram Session 文件: {', '.join(details)}")
     else:
         print(f"\n  ⚠️ 当前未在工作区检测到 .session 文件（通常在首次 bootstrap 后生成）")
+        print(f"     💡 提示：可运行 'python -m moyu_tg_relay.bootstrap_session' 生成 Session")
 
 
 def get_python_exe() -> str:
@@ -101,7 +144,7 @@ def get_python_exe() -> str:
     return sys.executable
 
 
-def handle_run_service(host: str = "0.0.0.0", port: int = 8080, reload: bool = True) -> None:
+def handle_run_service(host: str = "127.0.0.1", port: int = 8787, reload: bool = True) -> int:
     print(f"\n{ConsoleStyle.BOLD}🚀 正在启动 Moyu Telegram Relay 服务 ({host}:{port})...{ConsoleStyle.RESET}\n")
     py_exe = get_python_exe()
     cmd = [
@@ -122,10 +165,11 @@ def handle_run_service(host: str = "0.0.0.0", port: int = 8080, reload: bool = T
         env["PYTHONPATH"] = f"{src_dir}:{env['PYTHONPATH']}"
     else:
         env["PYTHONPATH"] = src_dir
-    subprocess.run(cmd, cwd=str(ROOT), env=env)
+    res = subprocess.run(cmd, cwd=str(ROOT), env=env)
+    return res.returncode
 
 
-def handle_smoke_check(url: str | None = None, token: str | None = None) -> None:
+def handle_smoke_check(url: str | None = None, token: str | None = None) -> int:
     print(f"\n{ConsoleStyle.BOLD}🧪 正在执行生产/本地 Smoke Check 连通性冒烟验收...{ConsoleStyle.RESET}\n")
     py_exe = get_python_exe()
     cmd = [py_exe, str(ROOT / "smoke_check.py")]
@@ -133,10 +177,11 @@ def handle_smoke_check(url: str | None = None, token: str | None = None) -> None
         cmd.extend(["--base-url", url])
     if token:
         cmd.extend(["--token", token])
-    subprocess.run(cmd, cwd=str(ROOT))
+    res = subprocess.run(cmd, cwd=str(ROOT))
+    return res.returncode
 
 
-def handle_unit_tests() -> None:
+def handle_unit_tests() -> int:
     print(f"\n{ConsoleStyle.BOLD}🧪 正在运行单元与集成测试 (unittest / pytest)...{ConsoleStyle.RESET}\n")
     py_exe = get_python_exe()
     env = os.environ.copy()
@@ -146,25 +191,37 @@ def handle_unit_tests() -> None:
     else:
         env["PYTHONPATH"] = src_dir
 
-    # Try pytest first, fallback to unittest
-    res = subprocess.run([py_exe, "-m", "pytest", "tests", "-v"], cwd=str(ROOT), env=env)
-    if res.returncode != 0:
-        # Fallback to unittest discover
-        subprocess.run([py_exe, "-m", "unittest", "discover", "tests", "-v"], cwd=str(ROOT), env=env)
+    # Check if pytest is available; only fallback to unittest if pytest is not installed
+    has_pytest = (
+        subprocess.run(
+            [py_exe, "-c", "import pytest"],
+            cwd=str(ROOT),
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+    if has_pytest:
+        res = subprocess.run([py_exe, "-m", "pytest", "tests", "-v"], cwd=str(ROOT), env=env)
+        return res.returncode
+
+    print(f"{ConsoleStyle.YELLOW}⚠️ 未检测到 pytest 模块，回退到 unittest 运行...{ConsoleStyle.RESET}\n")
+    res = subprocess.run([py_exe, "-m", "unittest", "discover", "tests", "-v"], cwd=str(ROOT), env=env)
+    return res.returncode
 
 
-
-def handle_deployment_guide() -> None:
+def handle_deployment_guide() -> int:
     print(f"\n{ConsoleStyle.BOLD}🐳 生产部署与向导 (deploy/install.sh):{ConsoleStyle.RESET}")
     install_script = ROOT / "deploy" / "install.sh"
     if not install_script.is_file():
         print(f"{ConsoleStyle.RED}❌ 未找到 {install_script}{ConsoleStyle.RESET}")
-        return
+        return 1
     print(f"  安装脚本路径: {install_script}")
     print("  支持模式：Docker Compose / systemd 自动化引导")
     confirm_run = input(f"\n{ConsoleStyle.CYAN}是否执行 install.sh 部署向导？ [y/N]: {ConsoleStyle.RESET}").strip().lower()
     if confirm_run in ("y", "yes"):
-        subprocess.run(["bash", str(install_script)], cwd=str(ROOT))
+        res = subprocess.run(["bash", str(install_script)], cwd=str(ROOT))
+        return res.returncode
+    return 0
 
 
 def interactive_loop() -> None:
@@ -207,8 +264,8 @@ def main() -> int:
 
     # run
     run_p = subparsers.add_parser("run", help="启动本地 Relay 服务")
-    run_p.add_argument("--host", default="0.0.0.0", help="监听地址")
-    run_p.add_argument("--port", type=int, default=8080, help="监听端口")
+    run_p.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
+    run_p.add_argument("--port", type=int, default=8787, help="监听端口 (默认 8787)")
     run_p.add_argument("--no-reload", action="store_true", help="禁用代码热重载")
 
     # smoke
@@ -232,15 +289,16 @@ def main() -> int:
         return 0
 
     if args.command == "run":
-        handle_run_service(host=args.host, port=args.port, reload=not args.no_reload)
+        return handle_run_service(host=args.host, port=args.port, reload=not args.no_reload)
     elif args.command == "smoke":
-        handle_smoke_check(url=args.url, token=args.token)
+        return handle_smoke_check(url=args.url, token=args.token)
     elif args.command == "test":
-        handle_unit_tests()
+        return handle_unit_tests()
     elif args.command == "check":
         handle_env_check()
+        return 0
     elif args.command == "install":
-        handle_deployment_guide()
+        return handle_deployment_guide()
 
     return 0
 
