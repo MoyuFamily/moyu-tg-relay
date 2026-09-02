@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import os
 import re
+import sys
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -47,6 +48,17 @@ def _setting(file_values: dict[str, str], name: str, default: str = "") -> str:
     if name in os.environ:
         return os.environ[name]
     return file_values.get(name, default)
+
+
+def _explicit_session_path(argv: list[str]) -> bool:
+    """Return whether the caller explicitly requested a file-session path.
+
+    ``--session-path`` was the historical bootstrap contract. Treating an
+    explicit occurrence as file-session mode keeps Docker/systemd installers and
+    existing operator commands backward compatible while a flag-less invocation
+    can safely default to exporting a portable StringSession.
+    """
+    return any(arg == "--session-path" or arg.startswith("--session-path=") for arg in argv)
 
 
 async def bootstrap_string_session(api_id: int, api_hash: str) -> tuple[str, int]:
@@ -104,14 +116,14 @@ def main() -> None:
         default=_setting(
             file_values,
             "TELEGRAM_SESSION_PATH",
-            "./.state/telegram.session",
+            "./.state/hax-telegram.session",
         ).strip(),
-        help="Target session file path when --file-session is used",
+        help="Target file-session path; explicitly passing this implies --file-session",
     )
     parser.add_argument(
         "--file-session",
         action="store_true",
-        help="Create the legacy file-backed session instead of printing a StringSession",
+        help="Create a file-backed session instead of printing a StringSession",
     )
     args = parser.parse_args()
 
@@ -121,7 +133,8 @@ def main() -> None:
             "(via flags, env, or --env-file)"
         )
 
-    if args.file_session:
+    file_session = args.file_session or _explicit_session_path(sys.argv[1:])
+    if file_session:
         asyncio.run(bootstrap_file_session(args.api_id, args.api_hash, args.session_path))
         return
 
