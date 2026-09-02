@@ -35,7 +35,7 @@ sudo .venv/bin/python -m pip install --upgrade pip
 sudo .venv/bin/pip install .
 ```
 
-仓库通过 `pyproject.toml` 声明唯一运行依赖和 `src/` package layout，不需要 `requirements.txt` 或额外 `PYTHONPATH`。
+`pyproject.toml` 是 Python package / standalone 安装的运行依赖来源；根目录 `requirements.txt` 同步维护相同的 pinned 依赖，供外部 Artifact 构建流程使用。CI 会校验两者保持一致。`src/` package layout 不需要额外 `PYTHONPATH`。
 
 ## 3. 配置环境变量
 
@@ -60,12 +60,15 @@ TELEGRAM_API_HASH
 
 ## 4. 初始化 Telegram Session
 
-bootstrap 直接通过 `--env-file` 读取 literal `KEY=VALUE`，**不会用 shell source/eval 解析 Secret**：
+bootstrap 直接通过 `--env-file` 读取 literal `KEY=VALUE`，**不会用 shell source/eval 解析 Secret**。
+
+systemd standalone 部署使用文件 Session。显式传入 `--session-path` 会保持历史兼容并自动选择 file-session 模式；也可以同时写出 `--file-session` 以强调意图：
 
 ```bash
 sudo -u moyu-tg-relay \
   /opt/moyu-tg-relay/.venv/bin/python -m moyu_tg_relay.bootstrap_session \
   --env-file /etc/moyu-tg-relay.env \
+  --file-session \
   --session-path /var/lib/moyu-tg-relay/telegram.session
 ```
 
@@ -76,6 +79,8 @@ Telegram session authorised. TELEGRAM_ACCOUNT_ID=<your-id>
 ```
 
 把真实 `TELEGRAM_ACCOUNT_ID` 写回 `/etc/moyu-tg-relay.env`。正式服务启动时会校验该 ID 与已授权 Session 是否一致。
+
+如果需要 Secret-managed / portable 部署，则不要传 `--session-path` / `--file-session`；裸调用 bootstrap 会输出 `TELEGRAM_SESSION_STRING`。
 
 ## 5. 安装并启动服务
 

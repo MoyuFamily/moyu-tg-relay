@@ -25,9 +25,30 @@ jobs:
       - name: Run unit tests
         run: |
           python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Validate dependency manifests
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          pyproject_deps = [item.strip() for item in project["project"]["dependencies"]]
+          requirements = [
+              line.strip()
+              for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.lstrip().startswith("#")
+          ]
+          if pyproject_deps != requirements:
+              raise SystemExit(
+                  "requirements.txt must exactly match pyproject.toml project.dependencies\n"
+                  f"pyproject={pyproject_deps!r}\nrequirements={requirements!r}"
+              )
+          PY
       - name: Validate CLI helpers
         run: |
           python -m moyu_tg_relay.bootstrap_session --help | grep -F -- '--env-file'
+          python -m moyu_tg_relay.bootstrap_session --help | grep -F -- '--file-session'
+          python -m moyu_tg_relay.bootstrap_session --help | grep -F -- '--session-path'
           python smoke_check.py --help | grep -F -- '--env-file'
       - name: Validate guided deployment script
         run: |
@@ -36,6 +57,8 @@ jobs:
           test -x deploy/install.sh
           grep -F 'chmod 0600 "$env_file"' deploy/install.sh
           grep -F 'chmod -R a+rX,go-w "$INSTALL_DIR"' deploy/install.sh
+          grep -F -- '--session-path /data/telegram.session' deploy/install.sh
+          grep -F -- '--session-path "${STATE_DIR}/telegram.session"' deploy/install.sh
           test ! -e deploy/docker/env.example
       - name: Validate Compose configuration
         run: |
@@ -53,3 +76,4 @@ jobs:
           grep -F 'ExecStart=/opt/moyu-tg-relay/.venv/bin/python -m uvicorn moyu_tg_relay.app:app' deploy/systemd/moyu-tg-relay.service
           grep -F 'sudo chown -R root:root /opt/moyu-tg-relay' deploy/systemd/README.md
           grep -F -- '--env-file /etc/moyu-tg-relay.env' deploy/systemd/README.md
+          grep -F -- '--file-session' deploy/systemd/README.md

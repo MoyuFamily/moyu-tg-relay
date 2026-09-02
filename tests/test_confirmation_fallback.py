@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import moyu_tg_relay.app as relay_app
+from moyu_tg_relay.providers.hax import HaxProvider
 from moyu_tg_relay.store import PendingOtpStore
 
 
@@ -34,6 +35,16 @@ def create_runner_request(store: PendingOtpStore):
         "123",
         300,
         context={"source": "renew-provider", "stage": "renew"},
+        provider="hax",
+    )
+
+
+def test_provider(*, auto_confirm=True):
+    return HaxProvider(
+        auto_confirm=auto_confirm,
+        confirmation_sender_ids=frozenset({"777000"}),
+        confirmation_markers=("hax.co.id", "hax"),
+        auto_confirm_buttons=frozenset({"confirm"}),
     )
 
 
@@ -42,18 +53,12 @@ class ConfirmationFallbackTests(unittest.IsolatedAsyncioTestCase):
         store = PendingOtpStore()
         request = create_runner_request(store)
         button = FakeButton()
-        event = FakeEvent(
-            text="Confirm login to hax.co.id",
-            buttons=[[button]],
-        )
+        event = FakeEvent(text="Confirm login to hax.co.id", buttons=[[button]])
 
         with (
             patch.object(relay_app, "store", store),
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "123"),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM", True),
-            patch.object(relay_app, "HAX_CONFIRMATION_SENDER_IDS", frozenset({"777000"})),
-            patch.object(relay_app, "HAX_CONFIRMATION_MARKERS", ("hax.co.id", "hax")),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM_BUTTONS", frozenset({"confirm"})),
+            patch.object(relay_app, "providers", {"hax": test_provider()}),
         ):
             await relay_app._handle_telegram_message(event)
 
@@ -71,10 +76,7 @@ class ConfirmationFallbackTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(relay_app, "store", store),
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "123"),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM", True),
-            patch.object(relay_app, "HAX_CONFIRMATION_SENDER_IDS", frozenset({"777000"})),
-            patch.object(relay_app, "HAX_CONFIRMATION_MARKERS", ("hax.co.id", "hax")),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM_BUTTONS", frozenset({"confirm"})),
+            patch.object(relay_app, "providers", {"hax": test_provider()}),
         ):
             await relay_app._handle_telegram_message(event)
 
@@ -93,10 +95,7 @@ class ConfirmationFallbackTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(relay_app, "store", store),
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "123"),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM", True),
-            patch.object(relay_app, "HAX_CONFIRMATION_SENDER_IDS", frozenset({"777000"})),
-            patch.object(relay_app, "HAX_CONFIRMATION_MARKERS", ("hax.co.id", "hax")),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM_BUTTONS", frozenset({"confirm"})),
+            patch.object(relay_app, "providers", {"hax": test_provider()}),
         ):
             await relay_app._handle_telegram_message(event)
 
@@ -106,18 +105,12 @@ class ConfirmationFallbackTests(unittest.IsolatedAsyncioTestCase):
         store = PendingOtpStore()
         request = create_runner_request(store)
         button = FakeButton(text="Confirm", kind="url")
-        event = FakeEvent(
-            text="Confirm login to hax.co.id",
-            buttons=[[button]],
-        )
+        event = FakeEvent(text="Confirm login to hax.co.id", buttons=[[button]])
 
         with (
             patch.object(relay_app, "store", store),
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "123"),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM", True),
-            patch.object(relay_app, "HAX_CONFIRMATION_SENDER_IDS", frozenset({"777000"})),
-            patch.object(relay_app, "HAX_CONFIRMATION_MARKERS", ("hax.co.id", "hax")),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM_BUTTONS", frozenset({"confirm"})),
+            patch.object(relay_app, "providers", {"hax": test_provider()}),
         ):
             await relay_app._handle_telegram_message(event)
 
@@ -132,20 +125,15 @@ class ConfirmationFallbackTests(unittest.IsolatedAsyncioTestCase):
             "123",
             300,
             context={"source": "other-service", "stage": "renew"},
+            provider="hax",
         )
         button = FakeButton()
-        event = FakeEvent(
-            text="Confirm login to hax.co.id",
-            buttons=[[button]],
-        )
+        event = FakeEvent(text="Confirm login to hax.co.id", buttons=[[button]])
 
         with (
             patch.object(relay_app, "store", store),
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "123"),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM", True),
-            patch.object(relay_app, "HAX_CONFIRMATION_SENDER_IDS", frozenset({"777000"})),
-            patch.object(relay_app, "HAX_CONFIRMATION_MARKERS", ("hax.co.id", "hax")),
-            patch.object(relay_app, "HAX_AUTO_CONFIRM_BUTTONS", frozenset({"confirm"})),
+            patch.object(relay_app, "providers", {"hax": test_provider()}),
         ):
             await relay_app._handle_telegram_message(event)
 

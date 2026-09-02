@@ -1,16 +1,6 @@
-"""moyu-tg-relay: Lightweight & secure Telegram 2FA/OTP relay microservice."""
+"""moyu-tg-relay: provider-driven Telegram interaction relay."""
 
-from .store import (
-    PendingOtp,
-    PendingOtpStore,
-    extract_hax_verification_code,
-    extract_verification_code,
-)
+from .store import PendingOtp, PendingOtpStore
 
-__all__ = [
-    "PendingOtp",
-    "PendingOtpStore",
-    "extract_hax_verification_code",
-    "extract_verification_code",
-]
+__all__ = ["PendingOtp", "PendingOtpStore"]
 __version__ = "0.1.0"

@@ -1,4 +1,4 @@
-"""One-time interactive bootstrap for the Telegram Telethon session."""
+"""One-time interactive bootstrap for Telegram Telethon sessions."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import argparse
 import asyncio
 import os
 import re
+import sys
 from pathlib import Path
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -48,16 +50,42 @@ def _setting(file_values: dict[str, str], name: str, default: str = "") -> str:
     return file_values.get(name, default)
 
 
-async def async_main(api_id: int, api_hash: str, session_path: str) -> None:
+def _explicit_session_path(argv: list[str]) -> bool:
+    """Return whether the caller explicitly requested a file-session path.
+
+    ``--session-path`` was the historical bootstrap contract. Treating an
+    explicit occurrence as file-session mode keeps Docker/systemd installers and
+    existing operator commands backward compatible while a flag-less invocation
+    can safely default to exporting a portable StringSession.
+    """
+    return any(arg == "--session-path" or arg.startswith("--session-path=") for arg in argv)
+
+
+async def bootstrap_string_session(api_id: int, api_hash: str) -> tuple[str, int]:
+    """Authorize interactively and return a portable StringSession plus account id."""
+    session = StringSession()
+    client = TelegramClient(session, api_id, api_hash)
+    await client.start()
+    me = await client.get_me()
+    session_string = client.session.save()
+    account_id = int(me.id)
+    await client.disconnect()
+    return session_string, account_id
+
+
+async def bootstrap_file_session(api_id: int, api_hash: str, session_path: str) -> int:
+    """Authorize interactively and persist a traditional file-backed session."""
     path_obj = Path(session_path).expanduser().resolve()
     path_obj.parent.mkdir(parents=True, exist_ok=True)
 
     client = TelegramClient(str(path_obj), api_id, api_hash)
     await client.start()
     me = await client.get_me()
-    print(f"Telegram session authorised. TELEGRAM_ACCOUNT_ID={me.id}")
-    print(f"Session saved to {path_obj}")
+    account_id = int(me.id)
     await client.disconnect()
+    print(f"Telegram session authorised. TELEGRAM_ACCOUNT_ID={account_id}")
+    print(f"Session saved to {path_obj}")
+    return account_id
 
 
 def main() -> None:
@@ -88,9 +116,14 @@ def main() -> None:
         default=_setting(
             file_values,
             "TELEGRAM_SESSION_PATH",
-            "./.state/telegram.session",
+            "./.state/hax-telegram.session",
         ).strip(),
-        help="Target session file path",
+        help="Target file-session path; explicitly passing this implies --file-session",
+    )
+    parser.add_argument(
+        "--file-session",
+        action="store_true",
+        help="Create a file-backed session instead of printing a StringSession",
     )
     args = parser.parse_args()
 
@@ -100,7 +133,17 @@ def main() -> None:
             "(via flags, env, or --env-file)"
         )
 
-    asyncio.run(async_main(args.api_id, args.api_hash, args.session_path))
+    file_session = args.file_session or _explicit_session_path(sys.argv[1:])
+    if file_session:
+        asyncio.run(bootstrap_file_session(args.api_id, args.api_hash, args.session_path))
+        return
+
+    session_string, account_id = asyncio.run(
+        bootstrap_string_session(args.api_id, args.api_hash)
+    )
+    print(f"Telegram session authorised. TELEGRAM_ACCOUNT_ID={account_id}")
+    print("Store the following value as a secret. Do not commit or log it:")
+    print(f"TELEGRAM_SESSION_STRING={session_string}")
 
 
 if __name__ == "__main__":

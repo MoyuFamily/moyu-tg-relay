@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "moyu-tg-relay"
 version = "0.1.0"
-description = "Moyu Telegram OTP relay service"
+description = "Provider-driven Telegram interaction relay service"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
