@@ -1,7 +1,10 @@
 """FastAPI + Telethon service that relays Hax verification interactions.
 
-Run this service on an independent private VPS. The Telethon session remains on
-that VPS and is never passed to GitHub Actions or committed to this repository.
+The relay supports two Telegram session backends:
+
+- ``TELEGRAM_SESSION_STRING`` for portable secret-backed deployments such as
+  MOYUWORK1 workloads. This mode is preferred when present.
+- ``TELEGRAM_SESSION_PATH`` for existing file-backed Docker/systemd deployments.
 
 Besides one-time verification codes, the relay can recognize tightly-scoped Hax
 Telegram confirmation cards. It attempts only explicitly allow-listed buttons
@@ -21,6 +24,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
 from .store import PendingOtpStore, extract_hax_verification_code
 
@@ -28,6 +32,7 @@ from .store import PendingOtpStore, extract_hax_verification_code
 RELAY_TOKEN = os.environ.get("OTP_RELAY_BEARER_TOKEN", "").strip()
 TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "0") or 0)
 TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
+TELEGRAM_SESSION_STRING = os.environ.get("TELEGRAM_SESSION_STRING", "").strip()
 TELEGRAM_SESSION_PATH = os.environ.get(
     "TELEGRAM_SESSION_PATH", "./.state/hax-telegram.session"
 ).strip()
@@ -104,8 +109,25 @@ def _validate_runtime() -> None:
         missing.append("TELEGRAM_API_HASH")
     if not TELEGRAM_ACCOUNT_ID:
         missing.append("TELEGRAM_ACCOUNT_ID")
+    if not TELEGRAM_SESSION_STRING and not TELEGRAM_SESSION_PATH:
+        missing.append("TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_PATH")
     if missing:
         raise RuntimeError("missing relay configuration: " + ", ".join(missing))
+
+
+def _telegram_session():
+    """Return the configured Telethon session backend.
+
+    Secret-backed StringSession takes precedence so workload deployments do not
+    depend on a host-local session file. Existing file-backed deployments remain
+    supported when TELEGRAM_SESSION_STRING is absent.
+    """
+    if TELEGRAM_SESSION_STRING:
+        try:
+            return StringSession(TELEGRAM_SESSION_STRING)
+        except Exception as error:
+            raise RuntimeError("TELEGRAM_SESSION_STRING is invalid") from error
+    return TELEGRAM_SESSION_PATH
 
 
 def _telegram_ready() -> bool:
@@ -160,9 +182,6 @@ def _looks_like_hax_confirmation(
     if request is None:
         return False
 
-    # Only a request created by the renewal runner may authorize automatic
-    # interaction. ``stage`` is optional for backward compatibility with the
-    # older runner, but an unknown explicit stage fails closed.
     source = request.context.get("source", "")
     stage = request.context.get("stage", "")
     if source and source != "renew-provider":
@@ -204,7 +223,6 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
     sender_id = str(getattr(sender, "id", "") or "")
     text = str(getattr(event, "raw_text", "") or "")
 
-    # Normal Hax OTP messages are still the primary machine-readable path.
     if sender_username == HAX_TELEGRAM_BOT.lower():
         code = extract_hax_verification_code(text)
         if code:
@@ -262,7 +280,7 @@ async def lifespan(_app: FastAPI):
     global telegram
     _validate_runtime()
     telegram = TelegramClient(
-        TELEGRAM_SESSION_PATH,
+        _telegram_session(),
         TELEGRAM_API_ID,
         TELEGRAM_API_HASH,
     )
@@ -281,8 +299,9 @@ async def lifespan(_app: FastAPI):
             "TELEGRAM_ACCOUNT_ID does not match the authorised Telegram session"
         )
     telegram.add_event_handler(_handle_telegram_message, events.NewMessage(incoming=True))
+    session_mode = "string" if TELEGRAM_SESSION_STRING else "file"
     print(
-        f"[otp-relay] Telegram session ready; Hax bot=@{HAX_TELEGRAM_BOT}; "
+        f"[otp-relay] Telegram session ready ({session_mode}); Hax bot=@{HAX_TELEGRAM_BOT}; "
         f"auto-confirm={'on' if HAX_AUTO_CONFIRM else 'off'}"
     )
     try:
