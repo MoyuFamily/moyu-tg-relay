@@ -1,8 +1,7 @@
-"""In-memory short-lived interaction store for the Hax Telegram relay."""
+"""Generic in-memory short-lived interaction store."""
 
 from __future__ import annotations
 
-import re
 import secrets
 import threading
 import time
@@ -10,8 +9,6 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
-CODE_PATTERN = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
-CODE_HINTS = ("verification", "verify", "code", "renew")
 ACTIVE_STATUSES = frozenset({"pending", "auto_attempted", "human_required", "ready"})
 TERMINAL_STATUSES = frozenset({"consumed", "expired", "cancelled"})
 TERMINAL_RETENTION_SECONDS = 600
@@ -20,6 +17,7 @@ TERMINAL_RETENTION_SECONDS = 600
 @dataclass
 class PendingOtp:
     request_id: str
+    provider: str
     account: str
     created_at: float
     expires_at: float
@@ -27,21 +25,6 @@ class PendingOtp:
     code: str = ""
     detail: str = ""
     context: dict[str, str] = field(default_factory=dict)
-
-
-def extract_hax_verification_code(text: str) -> str:
-    """Extract one plausible Hax verification code from a Telegram message.
-
-    This deliberately fails closed when the message is unrelated or contains
-    multiple numeric candidates. Confirmation cards are handled separately and
-    never interpreted as OTP text.
-    """
-    normalized = " ".join(str(text or "").split())
-    lower = normalized.lower()
-    if not normalized or not any(hint in lower for hint in CODE_HINTS):
-        return ""
-    candidates = list(dict.fromkeys(CODE_PATTERN.findall(normalized)))
-    return candidates[0] if len(candidates) == 1 else ""
 
 
 def _normalize_context(context: Mapping[str, Any] | None) -> dict[str, str]:
@@ -85,15 +68,20 @@ class PendingOtpStore:
         account: str,
         ttl_seconds: int = 300,
         context: Mapping[str, Any] | None = None,
+        *,
+        provider: str = "",
     ) -> PendingOtp:
         normalized_account = str(account or "").strip()
+        normalized_provider = str(provider or "").strip().lower()
         if not normalized_account:
             raise ValueError("account is required")
+        if not normalized_provider:
+            raise ValueError("provider is required")
         ttl = max(60, min(int(ttl_seconds), 600))
         with self._lock:
             self._expire_locked()
-            # A Telegram account can only have one current Hax interaction.
-            # Cancelling the previous one removes message/button ambiguity.
+            # One Telegram account can only have one active interaction. This
+            # keeps incoming message routing unambiguous across providers.
             for item in self._items.values():
                 if item.account == normalized_account and item.status in ACTIVE_STATUSES:
                     item.status = "cancelled"
@@ -102,6 +90,7 @@ class PendingOtpStore:
             now = self._clock()
             request = PendingOtp(
                 request_id=secrets.token_urlsafe(24),
+                provider=normalized_provider,
                 account=normalized_account,
                 created_at=now,
                 expires_at=now + ttl,
@@ -165,7 +154,7 @@ class PendingOtpStore:
     def attach_code(self, *, account: str, code: str) -> str:
         normalized_account = str(account or "").strip()
         normalized_code = str(code or "").strip()
-        if not normalized_account or not CODE_PATTERN.fullmatch(normalized_code):
+        if not normalized_account or not normalized_code or len(normalized_code) > 128:
             return ""
         with self._lock:
             self._expire_locked()
@@ -198,12 +187,4 @@ class PendingOtpStore:
                 item.detail = ""
 
 
-__all__ = [
-    "ACTIVE_STATUSES",
-    "PendingOtp",
-    "PendingOtpStore",
-    "extract_hax_verification_code",
-]
-
-
-extract_verification_code = extract_hax_verification_code
+__all__ = ["ACTIVE_STATUSES", "PendingOtp", "PendingOtpStore"]
