@@ -17,7 +17,7 @@
   - Bearer Token 强鉴权与 constant-time 比较；
   - Swagger / OpenAPI / ReDoc 默认关闭；
   - systemd 沙箱与 Docker `read_only + cap_drop: ALL`；
-  - Telethon Session 永远留在 Relay VPS，不进入 GitHub Actions。
+  - Telegram Session credential 永不进入源码、Git history 或发布 Artifact。独立 Docker/systemd 部署默认使用 Host 上的文件 Session；Secret-managed 部署可使用 `TELEGRAM_SESSION_STRING` 注入 Telethon `StringSession`。
 - ⚡ **短生命周期交互状态**：
   - 单 Telegram 账号只有一个 active request；
   - TTL、一次性 consume、终态自动回收；
@@ -112,6 +112,42 @@ HAX_AUTO_CONFIRM=false
 
 ---
 
+## 🔐 Session 与 Secret 模型
+
+以下内容都属于敏感凭据，不得提交到仓库、Issue、PR、日志或 Artifact：
+
+```text
+OTP_RELAY_BEARER_TOKEN
+TELEGRAM_API_HASH
+TELEGRAM_SESSION_STRING
+*.session
+```
+
+`TELEGRAM_SESSION_STRING` 与文件 `.session` 包含等价的长期 Telegram 登录能力，应按高敏 Secret 处理。
+
+### 独立 Docker / systemd 部署
+
+推荐继续使用文件 Session。部署向导会在目标 Host 上交互式完成 Telegram 登录，并将 `.session` 保存在受限权限的持久目录中。
+
+### Secret-managed / Workload 部署
+
+可在可信本机一次性执行：
+
+```bash
+python -m moyu_tg_relay.bootstrap_session
+```
+
+完成 Telegram 登录后会输出：
+
+```text
+TELEGRAM_ACCOUNT_ID=<account-id>
+TELEGRAM_SESSION_STRING=<secret-session-string>
+```
+
+将 `TELEGRAM_SESSION_STRING` 保存到部署系统的 Secret store 后，运行时通过环境变量注入即可。服务在 `TELEGRAM_SESSION_STRING` 存在时优先使用 `StringSession`；未配置时继续兼容 `TELEGRAM_SESSION_PATH` 文件 Session。
+
+---
+
 ## 🚀 推荐：引导式部署
 
 克隆仓库后只需要运行一个入口：
@@ -126,7 +162,6 @@ python3 -m scripts.manager
 # 或直接执行自动化部署向导
 ./deploy/install.sh
 ```
-
 
 如果 Docker Compose 和 systemd 都可用，向导会让你选择部署方式。也可以直接指定：
 
@@ -194,7 +229,7 @@ HAX_OTP_RELAY_URL=https://relay.example.com
 HAX_OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
 ```
 
-Telegram API ID / Hash 和 `.session` 不应进入 `moyu-renew` 或 GitHub Actions。
+Telegram API credential 与 Relay Session credential 不应进入 `moyu-renew` 或其 GitHub Actions。它们只属于 Relay 的部署边界。
 
 `moyu-renew` 负责：
 
@@ -236,6 +271,12 @@ DELETE /v1/otp/requests/{request_id}
 ```
 
 `detail` 只提供可安全暴露的状态说明，不返回 OTP。OTP 只允许在 `ready` 后通过 `consume` 返回一次。
+
+---
+
+## 🔒 安全报告
+
+如果发现安全问题，请不要在公开 Issue 中附带真实 Token、API Hash、StringSession、`.session` 内容或其他凭据。请先阅读 [SECURITY.md](SECURITY.md)。
 
 ---
 
