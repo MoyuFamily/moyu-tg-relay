@@ -69,7 +69,7 @@ class PendingOtpStore:
         ttl_seconds: int = 300,
         context: Mapping[str, Any] | None = None,
         *,
-        provider: str = "",
+        provider: str = "generic",
     ) -> PendingOtp:
         normalized_account = str(account or "").strip()
         normalized_provider = str(provider or "").strip().lower()
