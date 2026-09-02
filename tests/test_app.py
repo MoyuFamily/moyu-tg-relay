@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
-from telethon.sessions import StringSession
 
 import moyu_tg_relay.app as relay_app
 
@@ -59,18 +58,22 @@ class HaxOtpRelayAppTests(unittest.TestCase):
             self.assertEqual(relay_app._telegram_session(), "/tmp/relay.session")
 
     def test_string_session_takes_precedence_over_file_path(self):
-        encoded = StringSession().save()
+        sentinel = object()
         with (
-            patch.object(relay_app, "TELEGRAM_SESSION_STRING", encoded),
+            patch.object(relay_app, "TELEGRAM_SESSION_STRING", "secret-session"),
             patch.object(relay_app, "TELEGRAM_SESSION_PATH", "/tmp/relay.session"),
+            patch.object(relay_app, "StringSession", return_value=sentinel) as constructor,
         ):
             selected = relay_app._telegram_session()
 
-        self.assertIsInstance(selected, StringSession)
-        self.assertEqual(selected.save(), encoded)
+        self.assertIs(selected, sentinel)
+        constructor.assert_called_once_with("secret-session")
 
     def test_invalid_string_session_fails_closed(self):
-        with patch.object(relay_app, "TELEGRAM_SESSION_STRING", "not-a-session"):
+        with (
+            patch.object(relay_app, "TELEGRAM_SESSION_STRING", "not-a-session"),
+            patch.object(relay_app, "StringSession", side_effect=ValueError("bad")),
+        ):
             with self.assertRaisesRegex(RuntimeError, "TELEGRAM_SESSION_STRING is invalid"):
                 relay_app._telegram_session()
 
