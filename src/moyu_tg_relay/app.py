@@ -26,7 +26,7 @@ TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "0") or 0)
 TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
 TELEGRAM_SESSION_STRING = os.environ.get("TELEGRAM_SESSION_STRING", "").strip()
 TELEGRAM_SESSION_PATH = os.environ.get(
-    "TELEGRAM_SESSION_PATH", "./.state/telegram.session"
+    "TELEGRAM_SESSION_PATH", "./.state/hax-telegram.session"
 ).strip()
 TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
 
