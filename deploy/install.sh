@@ -177,9 +177,11 @@ ${domain} {
     reverse_proxy 127.0.0.1:8787
 }
 
-After DNS and TLS are ready, configure moyu-renew GitHub Secrets:
-  HAX_OTP_RELAY_URL=https://${domain}
-  HAX_OTP_RELAY_TOKEN=<value stored in the Relay env file>
+After DNS and TLS are ready, configure your client application Secrets:
+  OTP_RELAY_URL=https://${domain}
+  OTP_RELAY_TOKEN=<value stored in the Relay env file>
+
+(For moyu-renew, configure HAX_OTP_RELAY_URL and HAX_OTP_RELAY_TOKEN)
 EOF
 }
 

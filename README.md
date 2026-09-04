@@ -5,9 +5,9 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose_Ready-2496ED.svg)](deploy/docker/compose.yml)
 [![systemd](https://img.shields.io/badge/systemd-Hardened-success.svg)](deploy/systemd/moyu-tg-relay.service)
 
-> **轻量、安全、生产加固的 Telegram verification / confirmation 中继服务。**
+> **轻量、安全、生产加固的通用 Telegram 交互与验证码中继微服务。**
 >
-> Relay 长期持有 Telethon Session，为 `moyu-renew` 提供一次性 OTP、受限自动确认，以及自动失败后的可恢复人工 fallback 信号。
+> Relay 长期持有 Telethon Session，为下游各类无状态自动化任务（CI/CD、自动化脚本、后台爬虫/保活任务等）提供持久化 Telegram 交互桥接能力：支持一次性提取 2FA/OTP 验证码、受限规则的安全自动确认交互，以及自动失败后的可恢复人工 Fallback 信号。下游调用端无需感知任何 Telegram 登录凭据。
 
 ---
 
@@ -15,74 +15,103 @@
 
 - 🔒 **严格安全边界**：
   - Bearer Token 强鉴权与 constant-time 比较；
-  - Swagger / OpenAPI / ReDoc 默认关闭；
-  - systemd 沙箱与 Docker `read_only + cap_drop: ALL`；
-  - Telegram Session credential 永不进入源码、Git history 或发布 Artifact。独立 Docker/systemd 部署默认使用 Host 上的文件 Session；Secret-managed 部署可使用 `TELEGRAM_SESSION_STRING` 注入 Telethon `StringSession`。
+  - Swagger / OpenAPI / ReDoc 默认彻底关闭；
+  - 生产级沙箱：systemd 单元（14 项内核级加固）与 Docker（`read_only: true` + `cap_drop: ALL`）；
+  - Telegram Session 凭据永不进入源码、Git history 或发布 Artifact。独立 Docker/systemd 部署默认使用 Host 上的受保护文件 Session；Secret-managed 部署可使用 `TELEGRAM_SESSION_STRING` 注入 Telethon `StringSession`。
 - ⚡ **短生命周期交互状态**：
-  - 单 Telegram 账号只有一个 active request；
-  - TTL、一次性 consume、终态自动回收；
-  - sender、Telegram Account ID 与 Hax message marker 多重约束。
-- 🤖 **安全自动确认**：
-  - 仅当前存在唯一 active Hax request 时工作；
-  - sender、Hax marker 与 button text 必须同时命中白名单；
+  - 单 Telegram 账号在任意时刻仅允许一个 active request，从根源消除多任务并发时消息归属的歧义；
+  - TTL 自动过期、单次安全消费（One-Time Consume）、终态延迟回收机制。
+- 🔌 **插件化 Provider 架构**：
+  - 核心传输网络、状态存储与业务规则彻底解耦；
+  - 通过 Provider 机制独立定义不同 Bot/服务商的识别逻辑、验证码提取与确认规则；
+  - 内置开箱即用的 Hax Provider，支持[轻松扩展自定义 Provider](docs/provider-development.md)。
+- 🤖 **安全自动确认（Fail-Closed）**：
+  - 仅在当前存在唯一活跃且匹配的交互请求时触发；
+  - 发送方（Sender ID / Username）、消息特征词（Markers）与按钮文本必须同时命中严格白名单；
   - 只允许单一、无歧义的 allow-listed confirmation button；
-  - 任何未知按钮、歧义或点击异常都 fail-closed 到 `human_required`。
-- 🧩 **Human fallback**：
-  - Relay 不负责通知用户；只向 caller 暴露 `human_required`；
-  - `moyu-renew` 根据已配置渠道实时通知飞书 / Telegram Bot / 其他渠道，并保持原浏览器会话等待用户手机操作。
-- 🐳 **双模部署**：
+  - 遇到未知按钮、多选歧义、不可编程点击或执行异常时，一律安全退避至 `human_required`。
+- 🧩 **Human Fallback（人工干预可恢复）**：
+  - Relay 专注于 Telegram 交互中继，不强绑定特定通知通道；当无法自动安全完成时向 caller 暴露 `human_required` 状态；
+  - 调用端可根据自身业务通过飞书、钉钉、Telegram Bot、邮件等渠道即时告警，并保持原任务上下文等待用户在真实手机端确认。
+- 🐳 **双模加固部署**：
   - Docker Compose：named volume 持久化 Session，`/readyz` 作为容器健康检查；
   - systemd：代码 root-owned，仅 `/var/lib/moyu-tg-relay` 可持久写入。
-- 🧭 **引导式部署**：自动生成 Bearer Token、完成 Session bootstrap、提取并回填 `TELEGRAM_ACCOUNT_ID`、启动服务并执行完整 smoke check。
+- 🧭 **引导式自动化向导**：自动生成 Bearer Token、完成 Session bootstrap、提取并回填 `TELEGRAM_ACCOUNT_ID`、启动服务并执行完整 smoke check。
 
 ---
 
 ## 🔄 Interaction State Machine
 
 ```text
-moyu-renew 创建 active request
-            ↓
-Telegram incoming message
-            ↓
-┌───────────────────────────────┐
-│ OTP code                      │
-│   → ready → consume once      │
-├───────────────────────────────┤
-│ allow-listed confirmation     │
-│   → click                     │
-│   → auto_attempted            │
-├───────────────────────────────┤
-│ unknown / unsafe / click fail │
-│   → human_required            │
-└───────────────────────────────┘
+调用方客户端 (Automation Client) 创建 active request
+                    ↓
+        Telegram incoming message
+                    ↓
+        (Provider 消息识别与规则评估)
+                    ↓
+┌───────────────────────────────────────┐
+│ OTP code (收到验证码)                  │
+│   → ready → consume once (一次性安全提取)│
+├───────────────────────────────────────┤
+│ allow-listed confirmation (命中白名单) │
+│   → click (受限安全自动点击)            │
+│   → auto_attempted                    │
+├───────────────────────────────────────┤
+│ unknown / unsafe / click fail (不可控) │
+│   → human_required (通知人工介入)      │
+└───────────────────────────────────────┘
 ```
 
-完整状态：
+状态说明：
 
 ```text
 pending
-  尚未收到可处理 Telegram 交互
+  尚未收到可处理的目标 Telegram 交互消息
 
 auto_attempted
-  Relay 已尝试自动确认，caller 应给目标网页一个短 grace period
+  Relay 已尝试安全自动确认，caller 应给予目标服务一个短暂 grace period 观察状态
 
 human_required
-  无法安全自动完成，caller 应通知用户并保持原任务上下文等待
+  无法安全自动完成（如未知按钮、异常），caller 应通知人工介入并在原任务上下文中等待
 
 ready
-  OTP 已就绪，可以一次性 consume
+  OTP 验证码已就绪，等待调用方一次性提取
 
 consumed / expired / cancelled
-  terminal
+  终态（已消费 / 超时失效 / 主动取消）
 ```
 
-OTP 在 `auto_attempted` / `human_required` 之后仍可到达并把 request 转成 `ready`，因此用户手机完成 fallback 后不需要创建第二个 request。
+> **设计保障**：OTP 在 `auto_attempted` 或 `human_required` 之后仍可到达并把 request 转为 `ready`。当用户在手机端手动确认后，服务后续发送的验证码仍会被正常捕获，无需创建第二个 request。
 
 ---
 
-## 🛡️ Auto-confirm Safety Policy
+## 🔌 Provider 插件架构
 
-默认配置：
+`moyu-tg-relay` 采用解耦设计，将 Telegram 底层传输与具体业务识别规则分离：
+
+```text
+Telegram MTProto / Telethon
+            ↓
+       Relay Core (会话生命周期 / 请求路由 / 鉴权 / TTL 存储)
+            ↓
+    Provider Registry (注册表)
+            ↓
+  ┌───────────────────┬─────────────────────┐
+  │ Hax Provider      │ Custom Provider ... │
+  │ (内置提供者)       │ (用户自定义提供者)   │
+  └───────────────────┴─────────────────────┘
+```
+
+- **内置 Provider**：当前默认包含 `hax` Provider（实现 Hax 验证码提取与安全确认交互）；
+- **自定义扩展**：只需实现标准 `evaluate(message, request)` 接口即可接入任何 Telegram Bot 或群组交互。详见 [Provider 开发指南](docs/provider-development.md)。
+
+---
+
+## 🛡️ 自动交互安全策略（以内置 Hax 为例）
+
+Relay 坚持 **Fail-Closed（故障安全断开）** 原则。**绝不提供“只要看到 Telegram 里有 Confirm 按钮就全局乱点”的危险逻辑。**
+
+内置 Provider 的默认安全配置：
 
 ```text
 HAX_AUTO_CONFIRM=true
@@ -93,28 +122,24 @@ HAX_AUTO_CONFIRM_BUTTONS=confirm,approve,authorize,accept,yes,continue
 
 自动点击必须同时满足：
 
-1. 当前 `TELEGRAM_ACCOUNT_ID` 恰好只有一个 active Hax request；
-2. sender 为配置的 Hax Bot username，或 sender ID 命中 `HAX_CONFIRMATION_SENDER_IDS`；
+1. 当前 `TELEGRAM_ACCOUNT_ID` 恰好只有一个 active request；
+2. sender 为配置的 Bot username，或 sender ID 命中 `HAX_CONFIRMATION_SENDER_IDS`；
 3. message text 命中 `HAX_CONFIRMATION_MARKERS`；
-4. message 中恰好有一个按钮的 normalized text 命中 `HAX_AUTO_CONFIRM_BUTTONS`。
+4. message 中恰好有且仅有一个按钮命中 `HAX_AUTO_CONFIRM_BUTTONS` 白名单。
 
-**Relay 不会实现“看到 Telegram 里的 Confirm 就点击”的通用逻辑。**
-
-如果 Hax/Telegram 的真实确认消息格式发生变化，优先更新 sender / marker / button allow-list；不要放宽成全局自动点击。
-
-如果不希望 Relay 自动点击，可以：
+如果不希望 Relay 执行任何自动点击，可设置：
 
 ```text
 HAX_AUTO_CONFIRM=false
 ```
 
-此时匹配到 confirmation card 会直接进入 `human_required`。
+此时一旦匹配到 confirmation card 会直接进入 `human_required` 状态，提示人工确认。
 
 ---
 
 ## 🔐 Session 与 Secret 模型
 
-以下内容都属于敏感凭据，不得提交到仓库、Issue、PR、日志或 Artifact：
+以下内容均属于高敏感凭据，严禁提交到仓库、Issue、PR、日志或 Artifact 中：
 
 ```text
 OTP_RELAY_BEARER_TOKEN
@@ -123,15 +148,15 @@ TELEGRAM_SESSION_STRING
 *.session
 ```
 
-`TELEGRAM_SESSION_STRING` 与文件 `.session` 包含等价的长期 Telegram 登录能力，应按高敏 Secret 处理。
+`TELEGRAM_SESSION_STRING` 与文件 `.session` 拥有完全等价的 Telegram 长期登录权限，应按最高安全级别 Secret 保管。
 
 ### 独立 Docker / systemd 部署
 
-推荐继续使用文件 Session。部署向导会在目标 Host 上交互式完成 Telegram 登录，并将 `.session` 保存在受限权限的持久目录中。
+推荐使用文件 Session。部署向导会在目标主机上交互式完成 Telegram 登录，并将 `.session` 保存在受限权限的持久化隔离目录中。
 
 ### Secret-managed / Workload 部署
 
-可在可信本机一次性执行：
+可在可信本地机器一次性执行：
 
 ```bash
 python -m moyu_tg_relay.bootstrap_session
@@ -144,13 +169,13 @@ TELEGRAM_ACCOUNT_ID=<account-id>
 TELEGRAM_SESSION_STRING=<secret-session-string>
 ```
 
-将 `TELEGRAM_SESSION_STRING` 保存到部署系统的 Secret store 后，运行时通过环境变量注入即可。服务在 `TELEGRAM_SESSION_STRING` 存在时优先使用 `StringSession`；未配置时继续兼容 `TELEGRAM_SESSION_PATH` 文件 Session。
+将 `TELEGRAM_SESSION_STRING` 存入部署平台的 Secret store 后，运行时通过环境变量注入即可。服务在检测到 `TELEGRAM_SESSION_STRING` 时优先使用 `StringSession`；未配置时回退兼容 `TELEGRAM_SESSION_PATH` 文件 Session。
 
 ---
 
 ## 🚀 推荐：引导式部署
 
-克隆仓库后只需要运行一个入口：
+克隆仓库后只需运行一个命令：
 
 ```bash
 git clone https://github.com/MoyuFamily/moyu-tg-relay.git
@@ -163,7 +188,7 @@ python3 -m scripts.manager
 ./deploy/install.sh
 ```
 
-如果 Docker Compose 和 systemd 都可用，向导会让你选择部署方式。也可以直接指定：
+如果 Docker Compose 和 systemd 均可用，向导会提供交互式选择。也可显式指定模式：
 
 ```bash
 # Docker Compose（推荐）
@@ -173,113 +198,129 @@ python3 -m scripts.manager
 sudo ./deploy/install.sh systemd
 ```
 
-首次部署时用户只需要提供 Telegram `API ID` / `API Hash`，随后按 Telethon 提示输入手机号、Telegram 登录验证码以及账号开启 2FA 时的密码。其余步骤由脚本自动完成：
+首次部署时只需提供 Telegram `API ID` / `API Hash`，随后按 Telethon 提示输入手机号、登录验证码以及账号 2FA 密码（若开启）。向导会自动完成其余全部工作：
 
 ```text
 配置检查
-  -> 自动生成 Relay Bearer Token
+  -> 自动生成 256 位 Relay Bearer Token
   -> 构建/安装 runtime
   -> Telegram Session bootstrap
   -> 自动捕获 TELEGRAM_ACCOUNT_ID
-  -> 写回受限权限 env 文件
-  -> 启动 Relay
-  -> /healthz + /readyz
-  -> Bearer reject + accept smoke check
+  -> 写回受限权限 env 文件 (0600)
+  -> 启动 Relay 服务
+  -> /healthz + /readyz 存活探针
+  -> Bearer reject (401) + accept (404) 冒烟验收
 ```
 
-脚本是幂等入口：已有有效 Session 与 `TELEGRAM_ACCOUNT_ID` 时会直接复用，不会每次重新登录 Telegram。
+向导具备幂等性：检测到有效 Session 与 `TELEGRAM_ACCOUNT_ID` 时会自动复用，避免重复登录。
 
-> Relay 只监听 `127.0.0.1:8787`。远程 `moyu-renew` 应通过 Caddy/Nginx/Traefik 暴露 **HTTPS**，不要把 8787 明文端口直接开放到公网。
+> Relay 本地仅监听 `127.0.0.1:8787`。公网通信必须经由 Caddy / Nginx / Traefik 配置 **HTTPS 反向代理**，切勿将明文 8787 端口直接暴露至公网。
 
-手工部署与排障文档见 [deploy/README.md](deploy/README.md)。
+完整手工部署与排障文档请参阅 [deploy/README.md](deploy/README.md)。
 
 ---
 
 ## 🔍 健康检查与上线验收
 
-基础 liveness：
+基础存活检查（Liveness）：
 
 ```bash
 python3 smoke_check.py --base-url http://127.0.0.1:8787
 ```
 
-完整 readiness + auth：
+完整就绪性与鉴权校验（Readiness + Auth）：
 
 ```bash
-# Docker：脚本会自动在容器内部执行，无需把 Token 放到命令历史。
+# Docker：在容器内部执行，无泄漏命令历史风险
 docker compose --env-file .env -f deploy/docker/compose.yml exec -T moyu-tg-relay \
   python /app/smoke_check.py --base-url http://127.0.0.1:8787
 
-# systemd：从受限权限的 env 文件安全读取 Token。
+# systemd：从受限权限的 env 文件安全读取 Token
 sudo /opt/moyu-tg-relay/.venv/bin/python /opt/moyu-tg-relay/smoke_check.py \
   --base-url http://127.0.0.1:8787 \
   --env-file /etc/moyu-tg-relay.env
 ```
 
-完整 smoke check 会验证：HTTP 存活、Telethon 当前 ready、错误 Bearer Token 返回 401，以及正确 Token 能通过鉴权并到达受保护 handler。
+完整 smoke check 会严格验证：HTTP 进程存活、Telethon MTProto 已连接就绪、错误 Bearer Token 返回 401，以及有效 Token 成功通过鉴权。
 
 ---
 
-## 🔗 `moyu-renew` 接入
+## 🔗 调用方客户端接入 (Client Integration)
 
-Relay 通过 HTTPS 暴露后，`moyu-renew` 只需要两个 Secret：
-
-```text
-HAX_OTP_RELAY_URL=https://relay.example.com
-HAX_OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
-```
-
-Telegram API credential 与 Relay Session credential 不应进入 `moyu-renew` 或其 GitHub Actions。它们只属于 Relay 的部署边界。
-
-`moyu-renew` 负责：
+Relay 配置好 HTTPS 反向代理后，任何外部调用方（如自动化脚本、CI/CD Runner、定时保活服务等）只需配置两个环境变量：
 
 ```text
-auto_attempted
-  → 给网页 grace period
-  → 页面继续则无感运行
-
-human_required
-  → 通过所有已配置通知渠道即时提醒
-  → 保持 Selenium session
-  → 用户手机确认后继续同一 Action
-  → 超时才 action_required
+OTP_RELAY_URL=https://relay.example.com
+OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
 ```
 
-Relay **不决定使用飞书还是 Telegram Bot 通知**，通知渠道属于 `moyu-renew` 的职责。
+> **业务适配说明**：例如在 `moyu-renew` 云实例自动化续期项目中，对应配置即为 `HAX_OTP_RELAY_URL` 与 `HAX_OTP_RELAY_TOKEN`。
+
+### 核心调用流程
+
+1. **申请待提取请求**：
+   ```bash
+   POST /v1/otp/requests
+   Authorization: Bearer <OTP_RELAY_TOKEN>
+   Content-Type: application/json
+
+   {
+     "provider": "hax",
+     "account": "<TELEGRAM_ACCOUNT_ID>",
+     "ttl_seconds": 300,
+     "context": {"stage": "login"}
+   }
+   ```
+2. **轮询状态**：
+   ```bash
+   GET /v1/otp/requests/{request_id}
+   Authorization: Bearer <OTP_RELAY_TOKEN>
+   ```
+   - 若状态为 `auto_attempted`：给予目标网页短暂等待（如 5~10 秒），观察是否通过；
+   - 若状态为 `human_required`：调用端通过自身渠道（飞书、钉钉、Telegram Bot 等）即时告警，并保持任务上下文等待人工处理；
+   - 若状态为 `ready`：即可提取验证码。
+3. **单次提取验证码**：
+   ```bash
+   POST /v1/otp/requests/{request_id}/consume
+   Authorization: Bearer <OTP_RELAY_TOKEN>
+   ```
+   接口返回 `{"code": "..."}`。提取后请求状态立即变为 `consumed`，验证码从内存中彻底擦除。
+4. **清理释放**：
+   ```bash
+   DELETE /v1/otp/requests/{request_id}
+   ```
 
 ---
 
-## HTTP Contract
+## 📡 HTTP API 契约
 
-```text
-GET    /healthz
-GET    /readyz
-POST   /v1/otp/requests
-GET    /v1/otp/requests/{request_id}
-POST   /v1/otp/requests/{request_id}/consume
-DELETE /v1/otp/requests/{request_id}
-```
+| 方法 | 路径 | 鉴权 | 描述 |
+| :--- | :--- | :---: | :--- |
+| `GET` | `/healthz` | 否 | 进程存活检查（Liveness） |
+| `GET` | `/readyz` | 否 | Telegram 连通性检查（Readiness，200=可用，503=未就绪） |
+| `POST` | `/v1/otp/requests` | 是 | 创建等待交互请求（绑定 `provider` 与 `account`） |
+| `GET` | `/v1/otp/requests/{id}` | 是 | 查询交互状态与安全详情（不返回验证码） |
+| `POST` | `/v1/otp/requests/{id}/consume` | 是 | **一次性提取** 验证码（提取后立即失效） |
+| `DELETE` | `/v1/otp/requests/{id}` | 是 | 取消交互请求 |
 
-`GET /v1/otp/requests/{request_id}` 返回：
+`GET /v1/otp/requests/{request_id}` 响应格式：
 
 ```json
 {
   "request_id": "...",
   "status": "pending | auto_attempted | human_required | ready | consumed | expired | cancelled",
-  "detail": ""
+  "detail": "安全状态描述"
 }
 ```
-
-`detail` 只提供可安全暴露的状态说明，不返回 OTP。OTP 只允许在 `ready` 后通过 `consume` 返回一次。
 
 ---
 
 ## 🔒 安全报告
 
-如果发现安全问题，请不要在公开 Issue 中附带真实 Token、API Hash、StringSession、`.session` 内容或其他凭据。请先阅读 [SECURITY.md](SECURITY.md)。
+如果您在代码或部署流程中发现任何安全缺陷，请勿在公开 Issue 或 PR 中附带真实 Token、API Hash、StringSession 或 `.session` 内容。请先查阅 [SECURITY.md](SECURITY.md)。
 
 ---
 
 ## 📄 开源协议
 
-基于 [MIT License](LICENSE)。
+基于 [MIT License](LICENSE) 开源。
