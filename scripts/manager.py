@@ -238,31 +238,55 @@ def handle_deployment_guide() -> int:
     return 0
 
 
+def handle_bootstrap_session() -> int:
+    print(f"\n{ConsoleStyle.BOLD}🔑 正在启动 Telegram 会话与凭据自动化向导 (Bootstrap Session)...{ConsoleStyle.RESET}\n")
+    py_exe = get_python_exe()
+    cmd = [
+        py_exe,
+        "-m",
+        "moyu_tg_relay.bootstrap_session",
+        "--interactive",
+        "--env-file",
+        str(ENV_FILE),
+    ]
+    env = os.environ.copy()
+    src_dir = str(ROOT / "src")
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{src_dir}:{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = src_dir
+    res = subprocess.run(cmd, cwd=str(ROOT), env=env)
+    return res.returncode
+
+
 def interactive_loop() -> None:
     while True:
         print_banner()
         print(f"当前服务目录: {ConsoleStyle.BOLD}{ConsoleStyle.GREEN}{ROOT.name}{ConsoleStyle.RESET}\n")
-        print(f"  {ConsoleStyle.BOLD}[1]{ConsoleStyle.RESET} 🚀 启动本地 Relay 服务 (Run Uvicorn Server)")
-        print(f"  {ConsoleStyle.BOLD}[2]{ConsoleStyle.RESET} 🧪 运行 Smoke Check 冒烟验收 (Run Smoke Check)")
-        print(f"  {ConsoleStyle.BOLD}[3]{ConsoleStyle.RESET} 🧪 运行测试套件 (Run Pytest Tests)")
-        print(f"  {ConsoleStyle.BOLD}[4]{ConsoleStyle.RESET} 📋 检查本地 .env 与配置 (Check Environment)")
-        print(f"  {ConsoleStyle.BOLD}[5]{ConsoleStyle.RESET} 🐳 生产部署与引导 (Run install.sh)")
+        print(f"  {ConsoleStyle.BOLD}[1]{ConsoleStyle.RESET} 🔑 初始化 Telegram 会话与 Token (Bootstrap Session)")
+        print(f"  {ConsoleStyle.BOLD}[2]{ConsoleStyle.RESET} 🚀 启动本地 Relay 服务 (Run Uvicorn Server)")
+        print(f"  {ConsoleStyle.BOLD}[3]{ConsoleStyle.RESET} 🧪 运行 Smoke Check 冒烟验收 (Run Smoke Check)")
+        print(f"  {ConsoleStyle.BOLD}[4]{ConsoleStyle.RESET} 🧪 运行测试套件 (Run Pytest Tests)")
+        print(f"  {ConsoleStyle.BOLD}[5]{ConsoleStyle.RESET} 📋 检查本地 .env 与配置 (Check Environment)")
+        print(f"  {ConsoleStyle.BOLD}[6]{ConsoleStyle.RESET} 🐳 生产部署与引导 (Run install.sh)")
         print(f"  {ConsoleStyle.BOLD}[0]{ConsoleStyle.RESET} 🚪 退出控制台")
         print(f"\n{ConsoleStyle.CYAN}{'=' * 58}{ConsoleStyle.RESET}")
 
-        choice = input(f"{ConsoleStyle.BOLD}请选择操作 [0-5]: {ConsoleStyle.RESET}").strip()
+        choice = input(f"{ConsoleStyle.BOLD}请选择操作 [0-6]: {ConsoleStyle.RESET}").strip()
         if choice in ("0", "q", "exit"):
             print(f"\n{ConsoleStyle.GREEN}👋 再见！{ConsoleStyle.RESET}\n")
             break
         elif choice == "1":
-            handle_run_service()
+            handle_bootstrap_session()
         elif choice == "2":
-            handle_smoke_check()
+            handle_run_service()
         elif choice == "3":
-            handle_unit_tests()
+            handle_smoke_check()
         elif choice == "4":
-            handle_env_check()
+            handle_unit_tests()
         elif choice == "5":
+            handle_env_check()
+        elif choice == "6":
             handle_deployment_guide()
         else:
             print(f"{ConsoleStyle.RED}❌ 无效选项，请重新选择{ConsoleStyle.RESET}")
@@ -275,6 +299,9 @@ def main() -> int:
         description="Moyu Telegram Relay 统一运维与管理控制台"
     )
     subparsers = parser.add_subparsers(dest="command", help="子命令 (留空进入交互模式)")
+
+    # bootstrap
+    subparsers.add_parser("bootstrap", help="初始化 Telegram 会话与 Token")
 
     # run
     run_p = subparsers.add_parser("run", help="启动本地 Relay 服务")
@@ -302,7 +329,9 @@ def main() -> int:
         interactive_loop()
         return 0
 
-    if args.command == "run":
+    if args.command == "bootstrap":
+        return handle_bootstrap_session()
+    elif args.command == "run":
         return handle_run_service(host=args.host, port=args.port, reload=not args.no_reload)
     elif args.command == "smoke":
         return handle_smoke_check(url=args.url, token=args.token)
