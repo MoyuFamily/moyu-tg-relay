@@ -14,7 +14,7 @@ class FakeTelegram:
         return self.connected
 
 
-class HaxOtpRelayAppTests(unittest.TestCase):
+class MoyuTgRelayAppTests(unittest.TestCase):
     def test_public_api_docs_are_disabled(self):
         self.assertIsNone(relay_app.app.docs_url)
         self.assertIsNone(relay_app.app.redoc_url)

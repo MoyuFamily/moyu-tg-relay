@@ -147,10 +147,9 @@ configure_common_env() {
   fi
 
   value="$(env_get "$env_file" HAX_TELEGRAM_BOT)"
-  if [[ -z "$value" ]]; then
+  if [[ -n "$value" && ! "$value" =~ ^[A-Za-z0-9_]+$ ]]; then
+    warn "invalid HAX_TELEGRAM_BOT in ${env_file}; resetting to default HaxTG_bot"
     env_set "$env_file" HAX_TELEGRAM_BOT HaxTG_bot
-  elif [[ ! "$value" =~ ^[A-Za-z0-9_]+$ ]]; then
-    die "invalid HAX_TELEGRAM_BOT in ${env_file}"
   fi
 }
 
@@ -181,7 +180,8 @@ After DNS and TLS are ready, configure your client application Secrets:
   OTP_RELAY_URL=https://${domain}
   OTP_RELAY_TOKEN=<value stored in the Relay env file>
 
-(For moyu-renew, configure HAX_OTP_RELAY_URL and HAX_OTP_RELAY_TOKEN)
+Client-specific notes:
+  - moyu-renew: configure HAX_OTP_RELAY_URL and HAX_OTP_RELAY_TOKEN (or standard OTP_RELAY_URL/TOKEN)
 EOF
 }
 

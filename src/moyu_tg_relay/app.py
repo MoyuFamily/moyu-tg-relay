@@ -17,17 +17,28 @@ from pydantic import BaseModel, Field
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
+from pathlib import Path
+
 from .providers import IncomingMessage, TelegramProvider, build_provider_registry
 from .store import PendingOtpStore
+
+
+def _resolve_session_path() -> str:
+    explicit = os.environ.get("TELEGRAM_SESSION_PATH", "").strip()
+    if explicit:
+        return explicit
+    if Path("./.state/telegram.session").is_file():
+        return "./.state/telegram.session"
+    if Path("./.state/hax-telegram.session").is_file():
+        return "./.state/hax-telegram.session"
+    return "./.state/telegram.session"
 
 
 RELAY_TOKEN = os.environ.get("OTP_RELAY_BEARER_TOKEN", "").strip()
 TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "0") or 0)
 TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
 TELEGRAM_SESSION_STRING = os.environ.get("TELEGRAM_SESSION_STRING", "").strip()
-TELEGRAM_SESSION_PATH = os.environ.get(
-    "TELEGRAM_SESSION_PATH", "./.state/hax-telegram.session"
-).strip()
+TELEGRAM_SESSION_PATH = _resolve_session_path()
 TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
 
 store = PendingOtpStore()

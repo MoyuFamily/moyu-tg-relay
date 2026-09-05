@@ -111,13 +111,18 @@ def main() -> None:
         default=_setting(file_values, "TELEGRAM_API_HASH").strip(),
         help="Telegram API Hash",
     )
+    default_session_path = _setting(file_values, "TELEGRAM_SESSION_PATH").strip()
+    if not default_session_path:
+        if Path("./.state/telegram.session").is_file():
+            default_session_path = "./.state/telegram.session"
+        elif Path("./.state/hax-telegram.session").is_file():
+            default_session_path = "./.state/hax-telegram.session"
+        else:
+            default_session_path = "./.state/telegram.session"
+
     parser.add_argument(
         "--session-path",
-        default=_setting(
-            file_values,
-            "TELEGRAM_SESSION_PATH",
-            "./.state/hax-telegram.session",
-        ).strip(),
+        default=default_session_path,
         help="Target file-session path; explicitly passing this implies --file-session",
     )
     parser.add_argument(

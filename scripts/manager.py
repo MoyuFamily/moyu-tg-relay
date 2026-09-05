@@ -100,16 +100,15 @@ def handle_env_check() -> None:
         print(f"  💡 可参考 .env.example 进行配置。")
         return
 
-    keys = [
+    core_keys = [
         ("OTP_RELAY_BEARER_TOKEN", "Bearer 鉴权 Token"),
         ("TELEGRAM_API_ID", "Telegram API ID"),
         ("TELEGRAM_API_HASH", "Telegram API Hash"),
         ("TELEGRAM_ACCOUNT_ID", "Telegram 账号 ID"),
-        ("HAX_TELEGRAM_BOT", "Hax 机器人代号"),
-        ("HAX_AUTO_CONFIRM", "自动确认开关"),
     ]
 
-    for key, desc in keys:
+    print(f"\n  {ConsoleStyle.BOLD}【核心服务凭据】{ConsoleStyle.RESET}")
+    for key, desc in core_keys:
         val = env_map.get(key)
         if val:
             masked = (val[:3] + "***" + val[-3:]) if len(val) > 8 else "***"
@@ -118,6 +117,21 @@ def handle_env_check() -> None:
         else:
             status = f"{ConsoleStyle.RED}未配置{ConsoleStyle.RESET}"
             print(f"  ❌ {ConsoleStyle.BOLD}{key:<26}{ConsoleStyle.RESET} [{status}] {desc}")
+
+    provider_keys = [
+        ("HAX_TELEGRAM_BOT", "Hax 机器人代号 (默认: HaxTG_bot)"),
+        ("HAX_AUTO_CONFIRM", "自动确认开关 (默认: true)"),
+    ]
+
+    print(f"\n  {ConsoleStyle.BOLD}【内置 Provider 扩展设置 (可选)】{ConsoleStyle.RESET}")
+    for key, desc in provider_keys:
+        val = env_map.get(key)
+        if val:
+            status = f"{ConsoleStyle.GREEN}已配置{ConsoleStyle.RESET}"
+            print(f"  ℹ️ {ConsoleStyle.BOLD}{key:<26}{ConsoleStyle.RESET} [{status}] {desc} ({val})")
+        else:
+            status = f"{ConsoleStyle.DIM}默认生效{ConsoleStyle.RESET}"
+            print(f"  ⚪ {ConsoleStyle.BOLD}{key:<26}{ConsoleStyle.RESET} [{status}] {desc}")
 
     # Check session file if present
     session_files = find_session_files(env_map)

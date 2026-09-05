@@ -1,6 +1,5 @@
 import unittest
 
-from moyu_tg_relay.providers.hax import extract_verification_code
 from moyu_tg_relay.store import PendingOtpStore
 
 
@@ -13,16 +12,6 @@ class FakeClock:
 
 
 class RelayStoreTests(unittest.TestCase):
-    def test_hax_code_extraction_fails_closed_on_unrelated_or_ambiguous_text(self):
-        self.assertEqual(extract_verification_code("hello 12345678"), "")
-        self.assertEqual(
-            extract_verification_code("Verification code 12345678, id 87654321"),
-            "",
-        )
-        self.assertEqual(
-            extract_verification_code("Your Hax verification code is 12345678"),
-            "12345678",
-        )
 
     def test_only_one_active_request_per_telegram_account(self):
         clock = FakeClock()

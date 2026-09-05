@@ -107,33 +107,36 @@ Telegram MTProto / Telethon
 
 ---
 
-## 🛡️ 自动交互安全策略（以内置 Hax 为例）
+## 🛡️ 自动交互安全策略（Fail-Closed 原则）
 
 Relay 坚持 **Fail-Closed（故障安全断开）** 原则。**绝不提供“只要看到 Telegram 里有 Confirm 按钮就全局乱点”的危险逻辑。**
 
-内置 Provider 的默认安全配置：
+每个 Provider（无论是内置 Provider 还是自定义扩展）在评估自动确认时，都必须遵循严格的白名单与状态边界：
+
+1. **唯一活跃请求**：当前 `TELEGRAM_ACCOUNT_ID` 必须恰好存在一个匹配的 active request；
+2. **发送方严格白名单**：发送方必须为 Provider 显式声明的 Bot username，或 sender ID 命中受信任的系统白名单（如官方系统号 `777000`）；
+3. **消息特征白名单**：消息正文必须匹配 Provider 声明的特征标记（Markers）；
+4. **单一受限按钮白名单**：消息中必须有且仅有一个按钮命中允许的自动确认白名单；任何未知按钮、多选歧义或执行异常一律安全退避至 `human_required`。
+
+### 内置 Hax Provider 配置示例
+
+内置 `hax` Provider 严格遵循上述准则，默认安全配置如下：
 
 ```text
+HAX_TELEGRAM_BOT=HaxTG_bot
 HAX_AUTO_CONFIRM=true
 HAX_CONFIRMATION_SENDER_IDS=777000
 HAX_CONFIRMATION_MARKERS=hax.co.id,hax
 HAX_AUTO_CONFIRM_BUTTONS=confirm,approve,authorize,accept,yes,continue
 ```
 
-自动点击必须同时满足：
-
-1. 当前 `TELEGRAM_ACCOUNT_ID` 恰好只有一个 active request；
-2. sender 为配置的 Bot username，或 sender ID 命中 `HAX_CONFIRMATION_SENDER_IDS`；
-3. message text 命中 `HAX_CONFIRMATION_MARKERS`；
-4. message 中恰好有且仅有一个按钮命中 `HAX_AUTO_CONFIRM_BUTTONS` 白名单。
-
-如果不希望 Relay 执行任何自动点击，可设置：
+如果不希望 Hax 执行任何自动点击，可设置：
 
 ```text
 HAX_AUTO_CONFIRM=false
 ```
 
-此时一旦匹配到 confirmation card 会直接进入 `human_required` 状态，提示人工确认。
+此时一旦匹配到确认卡片将直接安全进入 `human_required` 状态，提示人工在手机端确认。
 
 ---
 
@@ -254,7 +257,7 @@ OTP_RELAY_URL=https://relay.example.com
 OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
 ```
 
-> **业务适配说明**：例如在 `moyu-renew` 云实例自动化续期项目中，对应配置即为 `HAX_OTP_RELAY_URL` 与 `HAX_OTP_RELAY_TOKEN`。
+> **客户端适配说明**：通用调用端建议统一配置 `OTP_RELAY_URL` 与 `OTP_RELAY_TOKEN`。在部分下游生态（如 `moyu-renew` 云实例自动续期）中，亦兼容对应的 `HAX_OTP_RELAY_URL` 与 `HAX_OTP_RELAY_TOKEN`。
 
 ### 核心调用流程
 
@@ -271,6 +274,7 @@ OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
      "context": {"stage": "login"}
    }
    ```
+   > 💡 `"provider"` 字段指定目标业务提供者（如内置的 `"hax"`，或自行扩展注册的 provider）。
 2. **轮询状态**：
    ```bash
    GET /v1/otp/requests/{request_id}
