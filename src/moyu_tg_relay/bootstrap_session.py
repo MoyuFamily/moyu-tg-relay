@@ -76,64 +76,6 @@ def update_env_file(env_path: Path, updates: dict[str, str]) -> None:
     env_path.write_text(content, encoding="utf-8")
 
 
-def find_vps_deploy_dir(current_dir: Path) -> Path | None:
-    """Locate adjacent moyu-vps-deploy repository directory if it exists."""
-    candidates = [
-        current_dir.parent / "moyu-vps-deploy",
-        current_dir.resolve().parent / "moyu-vps-deploy",
-        current_dir.parent.parent / "moyu-vps-deploy",
-    ]
-    for c in candidates:
-        if c.is_dir() and (c / ".env").is_file():
-            return c
-    return None
-
-
-def sync_to_vps_deploy(vps_deploy_dir: Path, secrets_map: dict[str, str]) -> bool:
-    """Merge private aliases into moyu-vps-deploy/.env WORKLOAD_SECRETS_JSON."""
-    env_file = vps_deploy_dir / ".env"
-    if not env_file.is_file():
-        return False
-    content = env_file.read_text(encoding="utf-8")
-    pattern = re.compile(
-        r"(?ms)^[ \t]*(?:export[ \t]+)?WORKLOAD_SECRETS_JSON[ \t]*=[ \t]*'(.*?)'[ \t]*$"
-    )
-    match = pattern.search(content)
-    store: dict[str, str] = {}
-    if match:
-        raw_json = match.group(1).replace("\\u0027", "'")
-        try:
-            store = json.loads(raw_json)
-        except Exception:
-            store = {}
-    else:
-        pattern_plain = re.compile(
-            r"(?ms)^[ \t]*(?:export[ \t]+)?WORKLOAD_SECRETS_JSON[ \t]*=[ \t]*({.*?})[ \t]*$"
-        )
-        match_plain = pattern_plain.search(content)
-        if match_plain:
-            try:
-                store = json.loads(match_plain.group(1))
-            except Exception:
-                store = {}
-
-    store.update(secrets_map)
-    raw = json.dumps(dict(store), ensure_ascii=False, indent=2, sort_keys=True)
-    dotenv_json = raw.replace("'", "\\u0027")
-    assignment = f"WORKLOAD_SECRETS_JSON='{dotenv_json}'"
-
-    if match:
-        content = pattern.sub(lambda _: assignment, content, count=1)
-    else:
-        pattern_any = re.compile(
-            r"(?ms)^[ \t]*(?:export[ \t]+)?WORKLOAD_SECRETS_JSON[ \t]*=.*?(?=\n[A-Z_][A-Z0-9_]*[ \t]*=|\Z)"
-        )
-        if pattern_any.search(content):
-            content = pattern_any.sub(lambda _: assignment, content, count=1)
-        else:
-            content = f"{content.rstrip()}\n\n{assignment}\n"
-    env_file.write_text(content, encoding="utf-8")
-    return True
 
 
 def _setting(file_values: dict[str, str], name: str, default: str = "") -> str:
@@ -249,61 +191,16 @@ def interactive_bootstrap(
     )
     print(f"  💾 凭据已自动写入本地: {target_env.name}")
 
-    # Sync to moyu-vps-deploy if detected
-    vps_deploy_dir = find_vps_deploy_dir(root_dir)
-    if vps_deploy_dir:
-        print(f"\n  🔗 检测到关联部署仓库: {vps_deploy_dir.name}")
-        ask = input("  是否自动将上述凭据直接写入 vps-deploy/.env 的 WORKLOAD_SECRETS_JSON？ [Y/n]: ").strip().lower()
-        if ask in ("", "y", "yes"):
-            synced = sync_to_vps_deploy(
-                vps_deploy_dir,
-                {
-                    "tg-relay-token": token,
-                    "tg-relay-api-id": str(api_id),
-                    "tg-relay-api-hash": api_hash,
-                    "tg-relay-account-id": str(account_id),
-                    "tg-relay-session-string": session_string,
-                },
-            )
-            if synced:
-                print("  🎉 凭据已自动同步到 moyu-vps-deploy/.env (WORKLOAD_SECRETS_JSON)！")
-            else:
-                print("  ⚠️ 同步到 vps-deploy/.env 失败，请检查文件是否存在。")
-
-    print("\n" + "-" * 60)
-    print("  📋 【后续部署 Ready-to-Use 模板】")
-    print("-" * 60)
-    print("\n  1. vps-deploy Manager 添加 Workload 时使用的 instance config JSON:")
-    example_config = {
-        "env": {"RELAY_HOST": "127.0.0.1", "RELAY_PORT": 8787},
-        "listenPorts": [8787],
-        "expose": [
-            {
-                "name": "api",
-                "protocol": "http",
-                "localPort": 8787,
-                "publicHost": "tg-relay.agenthub.kdns.fr",
-                "transport": "cloudflare-tunnel",
-                "access": "authenticated",
-                "authEnv": "OTP_RELAY_BEARER_TOKEN",
-            }
-        ],
-        "envRefs": {
-            "OTP_RELAY_BEARER_TOKEN": "tg-relay-token",
-            "TELEGRAM_API_ID": "tg-relay-api-id",
-            "TELEGRAM_API_HASH": "tg-relay-api-hash",
-            "TELEGRAM_ACCOUNT_ID": "tg-relay-account-id",
-            "TELEGRAM_SESSION_STRING": "tg-relay-session-string",
-        },
-        "startupGraceSeconds": 5,
-        "healthTimeoutSeconds": 25,
-    }
-    print(json.dumps(example_config, indent=2, ensure_ascii=False))
-
-    print("\n  2. 下游 client (如 moyu-renew) 配置环境变量:")
-    print("     HAX_OTP_RELAY_URL=https://tg-relay.agenthub.kdns.fr")
-    print(f"     HAX_OTP_RELAY_TOKEN={token}")
-    print("-" * 60 + "\n")
+    print("\n" + "=" * 60)
+    print("  🎉 Telegram 会话授权完成，凭据已全部就绪！")
+    print("=" * 60)
+    print(f"  Telegram Account ID : {account_id}")
+    print(f"  Relay Bearer Token  : {token}")
+    print(f"  Session String      : {session_string[:12]}...{session_string[-12:]}")
+    print(f"  已自动写入配置文件  : {target_env.name}")
+    print("\n  💡 快速启动本地服务：")
+    print("     python3 -m scripts.manager run")
+    print("=" * 60 + "\n")
     return 0
 
 
