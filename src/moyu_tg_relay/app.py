@@ -121,14 +121,15 @@ def _telegram_session():
     return TELEGRAM_SESSION_PATH
 
 
-def _probe_outbound_route(family: int, address: str, port: int) -> bool:
+def _probe_outbound_route(family: int, address: str, port: int, timeout: float = 1.5) -> bool:
     try:
-        sock = socket.socket(family, socket.SOCK_DGRAM)
-        try:
-            sock.connect((address, port))
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            if family == socket.AF_INET6:
+                sock.connect((address, port, 0, 0))
+            else:
+                sock.connect((address, port))
             return True
-        finally:
-            sock.close()
     except OSError:
         return False
 
