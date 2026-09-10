@@ -176,6 +176,49 @@ TELEGRAM_SESSION_STRING=<secret-session-string>
 
 ---
 
+## 📋 准备工作：申请 Telegram App ID 与 Token
+
+在部署 `moyu-tg-relay` 之前，需要先准备好 Telegram 开发者凭据（`App api_id` 与 `App api_hash`）。
+
+### 1. 申请 Telegram App ID / API Hash
+
+1. **访问官网**：在浏览器中打开 [https://my.telegram.org](https://my.telegram.org)；
+2. **手机号登录**：输入 Telegram 绑定的完整手机号（包含国际区号，如 `+86...` / `+1...`），随后在 Telegram 客户端（官方服务号 `777000`）接收并输入 Web 登录验证码；
+3. **进入开发工具**：登录后点击 **API development tools**；
+4. **创建应用 (Create new application)**：
+   - **App title**：应用名称（英文字符，如 `MoyuRelay`）；
+   - **Short name**：应用短简称（英文字符，如 `moyu_relay`）；
+   - **URL** / **Description**：可留空或填任意内容；
+   - **Platform**：任选（如 Web、Desktop 或 Other）；
+   - 点击 **Create application** 提交保存；
+5. **获取凭据**：创建成功后，页面会展示：
+   - **`App api_id`**（即纯数字的 `TELEGRAM_API_ID`）；
+   - **`App api_hash`**（即 32 位十六进制字符串的 `TELEGRAM_API_HASH`）。
+
+> [!WARNING]
+> **踩坑特别强调：提交时页面提示 `Error` 报错？**
+> 
+> 在 `my.telegram.org` 提交创建应用时，极其容易碰到页面直接弹红字 **`Error`**（或无明确原因的保存失败）。
+> 
+> **原因与解决办法**：
+> 这是 Telegram 对开发者后台非常严苛的 IP 防滥用与风控检测机制，绝大部分机房（IDC、VPS 或公共梯子节点）IP 都会被直接阻断。
+> - **碰到 Error 报错需要切换干净节点，最好 家宽（家庭宽带 / 原生住宅网络）**；
+> - 建议同时配合使用**浏览器无痕/隐私窗口**清理 Cookie 后重新登录提交；
+> - 成功率参考：**真实家宽 / 手机蜂窝网络 > 纯净住宅代理 >>> 常见机房节点**。
+
+---
+
+### 2. 关于 Token 凭据说明
+
+`moyu-tg-relay` 涉及的 Token 说明如下：
+
+- **Relay 访问密钥 (`OTP_RELAY_BEARER_TOKEN`)**：
+  - **无需手动申请**。在执行引导式部署向导（`./deploy/install.sh` 或 `python3 -m scripts.manager`）时，向导会自动通过 CSPRNG 安全随机算法生成 256 位高强度 Bearer Token，并自动写入受保护的配置文件。
+- **下游告警 Telegram Bot Token（可选）**：
+  - 若下游自动化任务需通过 Telegram Bot 接收通知或报警：在 Telegram 中联系官方认证的 [@BotFather](https://t.me/BotFather)，发送 `/newbot`，按提示设置 Bot 名称与 username，即可获取专属 HTTP API Token。
+
+---
+
 ## 🚀 推荐：引导式部署
 
 克隆仓库后只需运行一个命令：
