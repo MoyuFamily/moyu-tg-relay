@@ -6,7 +6,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 
 ACTIVE_STATUSES = frozenset({"pending", "auto_attempted", "human_required", "ready"})
@@ -27,7 +27,7 @@ class PendingOtp:
     context: dict[str, str] = field(default_factory=dict)
 
 
-def _normalize_context(context: Mapping[str, Any] | None) -> dict[str, str]:
+def _normalize_context(context: Optional[Mapping[str, Any]]) -> dict[str, str]:
     if not isinstance(context, Mapping):
         return {}
     normalized: dict[str, str] = {}
@@ -67,7 +67,7 @@ class PendingOtpStore:
         self,
         account: str,
         ttl_seconds: int = 300,
-        context: Mapping[str, Any] | None = None,
+        context: Optional[Mapping[str, Any]] = None,
         *,
         provider: str = "generic",
     ) -> PendingOtp:
@@ -115,7 +115,7 @@ class PendingOtpStore:
             if item.account == normalized_account and item.status in ACTIVE_STATUSES
         ]
 
-    def active_request(self, account: str) -> PendingOtp | None:
+    def active_request(self, account: str) -> Optional[PendingOtp]:
         """Return the sole active interaction for an account, if unambiguous."""
         with self._lock:
             self._expire_locked()

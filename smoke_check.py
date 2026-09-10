@@ -14,6 +14,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -73,7 +74,7 @@ def _json(body: str) -> dict:
 
 
 def _setting(
-    cli_value: str | None,
+    cli_value: Optional[str],
     file_values: dict[str, str],
     primary: str,
     fallback: str,

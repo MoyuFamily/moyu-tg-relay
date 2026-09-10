@@ -77,6 +77,63 @@ class MoyuTgRelayAppTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "TELEGRAM_SESSION_STRING is invalid"):
                 relay_app._telegram_session()
 
+    def test_detect_use_ipv6_env_override(self):
+        with patch.dict("os.environ", {"TELEGRAM_USE_IPV6": "true"}):
+            self.assertTrue(relay_app._detect_use_ipv6())
+        with patch.dict("os.environ", {"TELEGRAM_USE_IPV6": "1"}):
+            self.assertTrue(relay_app._detect_use_ipv6())
+        with patch.dict("os.environ", {"TELEGRAM_USE_IPV6": "false"}):
+            self.assertFalse(relay_app._detect_use_ipv6())
+        with patch.dict("os.environ", {"TELEGRAM_USE_IPV6": "0"}):
+            self.assertFalse(relay_app._detect_use_ipv6())
+
+    def test_detect_use_ipv6_auto_detects_ipv6_only_environment(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(relay_app, "_detect_has_ipv4", return_value=False),
+            patch.object(relay_app, "_detect_has_ipv6", return_value=True),
+        ):
+            self.assertTrue(relay_app._detect_use_ipv6())
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(relay_app, "_detect_has_ipv4", return_value=True),
+            patch.object(relay_app, "_detect_has_ipv6", return_value=True),
+        ):
+            self.assertFalse(relay_app._detect_use_ipv6())
+
+    def test_prepare_telegram_session_maps_dc_1_to_5_to_official_ipv6(self):
+        expected_mappings = {
+            1: "2001:b28:f23d:f001::a",
+            2: "2001:67c:4e8:f002::a",
+            3: "2001:b28:f23d:f003::a",
+            4: "2001:67c:4e8:f004::a",
+            5: "2001:b28:f23f:f005::a",
+        }
+        for dc_id, expected_ipv6 in expected_mappings.items():
+            with self.subTest(dc_id=dc_id):
+                session = relay_app.StringSession()
+                session.set_dc(dc_id, "149.154.167.50", 443)
+                with patch.object(relay_app, "_telegram_session", return_value=session):
+                    adapted = relay_app._prepare_telegram_session(use_ipv6=True)
+                    self.assertEqual(adapted.dc_id, dc_id)
+                    self.assertEqual(adapted.server_address, expected_ipv6)
+                    self.assertEqual(adapted.port, 443)
+
+    def test_telegram_client_preserves_dc5_on_ipv6_connect(self):
+        session = relay_app.StringSession()
+        session.set_dc(5, "149.154.171.5", 443)
+        with patch.object(relay_app, "_telegram_session", return_value=session):
+            adapted = relay_app._prepare_telegram_session(use_ipv6=True)
+            client = relay_app.TelegramClient(
+                adapted,
+                12345,
+                "test_hash",
+                use_ipv6=True,
+            )
+            self.assertEqual(client.session.dc_id, 5)
+            self.assertEqual(client.session.server_address, "2001:b28:f23f:f005::a")
+
 
 if __name__ == "__main__":
     unittest.main()

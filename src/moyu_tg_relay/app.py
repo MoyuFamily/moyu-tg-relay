@@ -8,19 +8,37 @@ authentication, and applying provider decisions.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import secrets
+import socket
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
-
-from pathlib import Path
+from telethon.sessions import SQLiteSession, StringSession
+from telethon.sessions.abstract import Session
 
 from .providers import IncomingMessage, TelegramProvider, build_provider_registry
 from .store import PendingOtpStore
+
+
+TELEGRAM_DC_IPV6_MAP: dict[int, str] = {
+    1: "2001:b28:f23d:f001::a",
+    2: "2001:67c:4e8:f002::a",
+    3: "2001:b28:f23d:f003::a",
+    4: "2001:67c:4e8:f004::a",
+    5: "2001:b28:f23f:f005::a",
+}
+
+TELEGRAM_DC_IPV4_MAP: dict[int, str] = {
+    1: "149.154.175.50",
+    2: "149.154.167.51",
+    3: "149.154.175.100",
+    4: "149.154.167.91",
+    5: "149.154.171.5",
+}
 
 
 def _resolve_session_path() -> str:
@@ -43,7 +61,7 @@ TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
 
 store = PendingOtpStore()
 providers: dict[str, TelegramProvider] = build_provider_registry()
-telegram: TelegramClient | None = None
+telegram: Optional[TelegramClient] = None
 
 
 class CreateRequest(BaseModel):
@@ -68,7 +86,7 @@ class ConsumeResponse(BaseModel):
     code: str
 
 
-def require_auth(authorization: str | None = Header(default=None)) -> None:
+def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
     expected = f"Bearer {RELAY_TOKEN}" if RELAY_TOKEN else ""
     supplied = str(authorization or "")
     if not expected or not secrets.compare_digest(supplied, expected):
@@ -103,6 +121,80 @@ def _telegram_session():
     return TELEGRAM_SESSION_PATH
 
 
+def _probe_outbound_route(family: int, address: str, port: int) -> bool:
+    try:
+        sock = socket.socket(family, socket.SOCK_DGRAM)
+        try:
+            sock.connect((address, port))
+            return True
+        finally:
+            sock.close()
+    except OSError:
+        return False
+
+
+def _detect_has_ipv6() -> bool:
+    """Check if the host has an active IPv6 outbound route."""
+    for probe_addr in ("2001:67c:4e8:f002::a", "2606:4700:4700::1111"):
+        if _probe_outbound_route(socket.AF_INET6, probe_addr, 443):
+            return True
+    return False
+
+
+def _detect_has_ipv4() -> bool:
+    """Check if the host has an active IPv4 outbound route."""
+    for probe_addr in ("149.154.167.51", "1.1.1.1"):
+        if _probe_outbound_route(socket.AF_INET, probe_addr, 443):
+            return True
+    return False
+
+
+def _detect_use_ipv6(session: Optional[Session] = None) -> bool:
+    """Determine whether to use IPv6 for Telegram connection."""
+    raw_env = os.environ.get("TELEGRAM_USE_IPV6", "").strip().lower()
+    if raw_env in ("1", "true", "yes", "on"):
+        return True
+    if raw_env in ("0", "false", "no", "off"):
+        return False
+
+    if session is not None and ":" in str(getattr(session, "server_address", "") or ""):
+        return True
+
+    has_v4 = _detect_has_ipv4()
+    has_v6 = _detect_has_ipv6()
+    # On IPv6-only environments (e.g. Hax VPS where IPv4 is unreachable), automatically use IPv6
+    if not has_v4 and has_v6:
+        return True
+    return False
+
+
+def _prepare_telegram_session(use_ipv6: bool = False) -> Session:
+    """Return an initialized Telethon Session instance with DC routing adapted."""
+    raw = _telegram_session()
+    if isinstance(raw, (str, Path)):
+        session = SQLiteSession(str(raw))
+    elif isinstance(raw, Session):
+        session = raw
+    else:
+        raise TypeError(f"Unsupported session backend: {type(raw).__name__}")
+
+    dc_id = getattr(session, "dc_id", 0) or 2
+    port = getattr(session, "port", 0) or 443
+
+    if use_ipv6:
+        ipv6_ip = TELEGRAM_DC_IPV6_MAP.get(dc_id, TELEGRAM_DC_IPV6_MAP[2])
+        session.set_dc(dc_id, ipv6_ip, port)
+        print(f"[interaction-relay] Updated session to IPv6: DC {dc_id}, IP: {ipv6_ip}")
+    else:
+        server_addr = str(getattr(session, "server_address", "") or "")
+        if ":" in server_addr:
+            ipv4_ip = TELEGRAM_DC_IPV4_MAP.get(dc_id, TELEGRAM_DC_IPV4_MAP[2])
+            session.set_dc(dc_id, ipv4_ip, port)
+            print(f"[interaction-relay] Updated session to IPv4: DC {dc_id}, IP: {ipv4_ip}")
+
+    return session
+
+
 def _telegram_ready() -> bool:
     if telegram is None:
         return False
@@ -117,7 +209,7 @@ def _iter_message_buttons(event: events.NewMessage.Event) -> tuple[Any, ...]:
     return tuple(button for row in rows for button in (row or []))
 
 
-def _provider_for(name: str) -> TelegramProvider | None:
+def _provider_for(name: str) -> Optional[TelegramProvider]:
     return providers.get(str(name or "").strip().lower())
 
 
@@ -205,11 +297,22 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
 async def lifespan(_app: FastAPI):
     global telegram
     _validate_runtime()
+    raw_session = _telegram_session()
+    initial_session = SQLiteSession(str(raw_session)) if isinstance(raw_session, (str, Path)) else raw_session
+    use_ipv6 = _detect_use_ipv6(session=initial_session if isinstance(initial_session, Session) else None)
+    session = _prepare_telegram_session(use_ipv6=use_ipv6)
     telegram = TelegramClient(
-        _telegram_session(),
+        session,
         TELEGRAM_API_ID,
         TELEGRAM_API_HASH,
+        use_ipv6=use_ipv6,
     )
+    if use_ipv6 and telegram.session.dc_id in TELEGRAM_DC_IPV6_MAP:
+        target_ip = TELEGRAM_DC_IPV6_MAP[telegram.session.dc_id]
+        if telegram.session.server_address != target_ip:
+            telegram.session.set_dc(
+                telegram.session.dc_id, target_ip, telegram.session.port or 443
+            )
     await telegram.connect()
     if not await telegram.is_user_authorized():
         await telegram.disconnect()
@@ -227,8 +330,9 @@ async def lifespan(_app: FastAPI):
     telegram.add_event_handler(_handle_telegram_message, events.NewMessage(incoming=True))
     session_mode = "string" if TELEGRAM_SESSION_STRING else "file"
     provider_names = ",".join(sorted(providers))
+    ip_mode = f"ipv6:dc{telegram.session.dc_id}" if use_ipv6 else f"ipv4:dc{telegram.session.dc_id}"
     print(
-        f"[interaction-relay] Telegram session ready ({session_mode}); "
+        f"[interaction-relay] Telegram session ready ({session_mode}, {ip_mode}); "
         f"providers={provider_names}"
     )
     try:

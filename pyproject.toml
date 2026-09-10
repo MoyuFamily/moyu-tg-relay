@@ -7,12 +7,13 @@ name = "moyu-tg-relay"
 version = "0.1.0"
 description = "Provider-driven Telegram interaction relay service"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
   "fastapi==0.115.8",
   "uvicorn[standard]==0.34.0",
   "telethon==1.38.1",
   "pydantic==2.10.6",
+  "eval-type-backport>=0.2.0",
 ]
 
 [tool.setuptools.packages.find]

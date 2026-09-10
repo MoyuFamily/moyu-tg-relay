@@ -11,6 +11,8 @@ import re
 import secrets
 import sys
 
+from typing import Optional
+
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -24,7 +26,7 @@ _PLACEHOLDERS = {
 }
 
 
-def is_placeholder(key: str, val: str | None) -> bool:
+def is_placeholder(key: str, val: Optional[str]) -> bool:
     v = str(val or "").strip()
     if not v:
         return True
@@ -116,7 +118,7 @@ async def bootstrap_file_session(api_id: int, api_hash: str, session_path: str) 
 
 
 def interactive_bootstrap(
-    env_file_path: Path | None = None,
+    env_file_path: Optional[Path] = None,
     *,
     force_token_regen: bool = False,
 ) -> int:

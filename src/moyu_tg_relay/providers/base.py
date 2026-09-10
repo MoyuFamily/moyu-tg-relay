@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Optional, Protocol
 
 
 @dataclass(frozen=True)
@@ -19,7 +19,7 @@ class ProviderDecision:
     action: str = "ignore"
     code: str = ""
     detail: str = ""
-    button: Any | None = None
+    button: Optional[Any] = None
 
     @classmethod
     def ignore(cls) -> "ProviderDecision":

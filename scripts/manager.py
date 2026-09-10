@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
@@ -183,7 +184,7 @@ def handle_run_service(host: str = "127.0.0.1", port: int = 8787, reload: bool =
     return res.returncode
 
 
-def handle_smoke_check(url: str | None = None, token: str | None = None) -> int:
+def handle_smoke_check(url: Optional[str] = None, token: Optional[str] = None) -> int:
     print(f"\n{ConsoleStyle.BOLD}🧪 正在执行生产/本地 Smoke Check 连通性冒烟验收...{ConsoleStyle.RESET}\n")
     py_exe = get_python_exe()
     cmd = [py_exe, str(ROOT / "smoke_check.py")]
