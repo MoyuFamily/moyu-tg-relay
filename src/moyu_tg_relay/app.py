@@ -50,15 +50,6 @@ def _resolve_state_dir() -> Path:
         p = Path(explicit_state)
         p.mkdir(parents=True, exist_ok=True)
         return p
-    workload_root = os.environ.get("MOYU_WORKLOAD_ROOT", "").strip()
-    if workload_root:
-        p = Path(workload_root) / ".state"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-    if Path("/data").is_dir() and os.access("/data", os.W_OK):
-        return Path("/data")
-    if Path("/var/lib/moyu-tg-relay").is_dir() and os.access("/var/lib/moyu-tg-relay", os.W_OK):
-        return Path("/var/lib/moyu-tg-relay")
     p = Path("./.state")
     p.mkdir(parents=True, exist_ok=True)
     return p
