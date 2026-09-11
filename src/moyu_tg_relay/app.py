@@ -44,15 +44,42 @@ TELEGRAM_DC_IPV4_MAP: dict[int, str] = {
 }
 
 
+def _resolve_state_dir() -> Path:
+    explicit_state = os.environ.get("STATE_DIR", "").strip()
+    if explicit_state:
+        p = Path(explicit_state)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    workload_root = os.environ.get("MOYU_WORKLOAD_ROOT", "").strip()
+    if workload_root:
+        p = Path(workload_root) / ".state"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    if Path("/data").is_dir() and os.access("/data", os.W_OK):
+        return Path("/data")
+    if Path("/var/lib/moyu-tg-relay").is_dir() and os.access("/var/lib/moyu-tg-relay", os.W_OK):
+        return Path("/var/lib/moyu-tg-relay")
+    p = Path("./.state")
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+STATE_DIR = _resolve_state_dir()
+
+
 def _resolve_session_path() -> str:
     explicit = os.environ.get("TELEGRAM_SESSION_PATH", "").strip()
     if explicit:
         return explicit
-    if Path("./.state/telegram.session").is_file():
-        return "./.state/telegram.session"
-    if Path("./.state/hax-telegram.session").is_file():
-        return "./.state/hax-telegram.session"
-    return "./.state/telegram.session"
+    for candidate in (
+        STATE_DIR / "telegram.session",
+        STATE_DIR / "hax-telegram.session",
+        Path("./.state/telegram.session"),
+        Path("./.state/hax-telegram.session"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return str(STATE_DIR / "telegram.session")
 
 
 RELAY_TOKEN = os.environ.get("OTP_RELAY_BEARER_TOKEN", "").strip()
@@ -63,7 +90,7 @@ TELEGRAM_SESSION_PATH = _resolve_session_path()
 TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
 OTP_STORE_FILE = os.environ.get(
     "OTP_STORE_FILE",
-    "./.state/pending_otp_store.json",
+    str(STATE_DIR / "pending_otp_store.json"),
 ).strip()
 RELAY_LOG_DB_PATH = os.environ.get(
     "RELAY_LOG_DB_PATH",
