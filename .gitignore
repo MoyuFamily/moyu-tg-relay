@@ -23,6 +23,7 @@ ENV/
 build/
 dist/
 .pytest_cache/
+uv.lock
 
 # IDE
 .idea/
