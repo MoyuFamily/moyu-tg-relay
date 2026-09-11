@@ -210,8 +210,8 @@ def _telegram_ready() -> bool:
         return False
 
 
-def _iter_message_buttons(event: events.NewMessage.Event) -> tuple[Any, ...]:
-    rows = getattr(event, "buttons", None) or []
+def _iter_message_buttons(msg_or_event: Any) -> tuple[Any, ...]:
+    rows = getattr(msg_or_event, "buttons", None) or []
     return tuple(button for row in rows for button in (row or []))
 
 
@@ -231,30 +231,32 @@ def _mark_human_required(detail: str, *, provider_name: str) -> None:
         )
 
 
-async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
-    request = store.active_request(TELEGRAM_ACCOUNT_ID)
-    if request is None:
-        return
-
+async def _process_incoming_telegram_message(
+    *,
+    sender_username: str,
+    sender_id: str,
+    text: str,
+    buttons: tuple[Any, ...],
+    request: PendingOtp,
+) -> bool:
     provider = _provider_for(request.provider)
     if provider is None:
         _mark_human_required(
             f"provider is no longer available: {request.provider}",
             provider_name=request.provider,
         )
-        return
+        return False
 
-    sender = await event.get_sender()
     message = IncomingMessage(
-        sender_username=str(getattr(sender, "username", "") or "").lower(),
-        sender_id=str(getattr(sender, "id", "") or ""),
-        text=str(getattr(event, "raw_text", "") or ""),
-        buttons=_iter_message_buttons(event),
+        sender_username=sender_username,
+        sender_id=sender_id,
+        text=text,
+        buttons=buttons,
     )
     decision = provider.evaluate(message, request)
 
     if decision.action == "ignore":
-        return
+        return False
 
     if decision.action == "code":
         request_id = store.attach_code(
@@ -266,18 +268,18 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
                 f"[interaction-relay] {provider.name} code attached to "
                 f"{request_id[:8]}…"
             )
-        return
+        return True
 
     if decision.action == "human_required":
         _mark_human_required(decision.detail, provider_name=provider.name)
-        return
+        return True
 
     if decision.action != "click" or decision.button is None:
         _mark_human_required(
             f"provider returned unsupported action: {decision.action}",
             provider_name=provider.name,
         )
-        return
+        return True
 
     try:
         await decision.button.click()
@@ -286,7 +288,7 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
             f"自动点击 Telegram 确认失败: {type(error).__name__}",
             provider_name=provider.name,
         )
-        return
+        return True
 
     request_id = store.mark_auto_attempted(
         account=TELEGRAM_ACCOUNT_ID,
@@ -297,6 +299,70 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
             f"[interaction-relay] automatic {provider.name} interaction attempted "
             f"for {request_id[:8]}…"
         )
+    return True
+
+
+async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
+    request = store.active_request(TELEGRAM_ACCOUNT_ID)
+    if request is None:
+        return
+
+    sender = await event.get_sender()
+    sender_username = str(getattr(sender, "username", "") or "").lower()
+    sender_id = str(getattr(sender, "id", "") or "")
+    text = str(getattr(event, "raw_text", "") or "")
+    buttons = _iter_message_buttons(event)
+
+    await _process_incoming_telegram_message(
+        sender_username=sender_username,
+        sender_id=sender_id,
+        text=text,
+        buttons=buttons,
+        request=request,
+    )
+
+
+async def _poll_pending_interaction(request: PendingOtp) -> None:
+    if telegram is None:
+        return
+    provider = _provider_for(request.provider)
+    if provider is None:
+        return
+
+    targets: list[Any] = []
+    if hasattr(provider, "confirmation_sender_ids"):
+        for sid in getattr(provider, "confirmation_sender_ids"):
+            targets.append(int(sid) if str(sid).isdigit() else sid)
+    if hasattr(provider, "bot_username") and provider.bot_username:
+        targets.append(provider.bot_username)
+
+    for target in targets:
+        try:
+            messages = await telegram.get_messages(target, limit=2)
+            for msg in messages:
+                if request.status != "pending":
+                    return
+                msg_date = getattr(msg, "date", None)
+                if msg_date:
+                    ts = msg_date.timestamp()
+                    if ts < request.created_at - 10:
+                        continue
+                sender = await msg.get_sender()
+                sender_username = str(getattr(sender, "username", "") or "").lower()
+                sender_id = str(getattr(sender, "id", "") or "")
+                text = str(getattr(msg, "raw_text", "") or "")
+                buttons = _iter_message_buttons(msg)
+                processed = await _process_incoming_telegram_message(
+                    sender_username=sender_username,
+                    sender_id=sender_id,
+                    text=text,
+                    buttons=buttons,
+                    request=request,
+                )
+                if processed:
+                    return
+        except Exception as error:
+            print(f"[interaction-relay] active poll error for {target}: {error}")
 
 
 @asynccontextmanager
@@ -452,11 +518,15 @@ def create_request(payload: CreateRequest) -> CreateResponse:
     response_model=StatusResponse,
     dependencies=[Depends(require_auth)],
 )
-def request_status(request_id: str) -> StatusResponse:
+async def request_status(request_id: str) -> StatusResponse:
     try:
         request = store.get(request_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="request not found") from error
+
+    if request.status == "pending" and _telegram_ready():
+        await _poll_pending_interaction(request)
+
     return StatusResponse(
         request_id=request.request_id,
         status=request.status,

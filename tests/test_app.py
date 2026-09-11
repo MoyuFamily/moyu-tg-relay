@@ -191,6 +191,31 @@ class MoyuTgRelayAppTests(unittest.TestCase):
                 relay_app.create_request(payload)
             self.assertEqual(ctx.exception.status_code, 403)
 
+    def test_request_status_polls_pending_telegram_messages(self):
+        import asyncio
+
+        store = relay_app.PendingOtpStore()
+        req = store.create("6812345678", 300, provider="hax")
+        fake_telegram = FakeTelegram(connected=True)
+        polled_requests = []
+
+        async def fake_poll(target_request):
+            polled_requests.append(target_request.request_id)
+            target_request.status = "auto_attempted"
+
+        async def run_test():
+            with (
+                patch.object(relay_app, "store", store),
+                patch.object(relay_app, "telegram", fake_telegram),
+                patch.object(relay_app, "_poll_pending_interaction", side_effect=fake_poll),
+            ):
+                return await relay_app.request_status(req.request_id)
+
+        resp = asyncio.run(run_test())
+        self.assertEqual(polled_requests, [req.request_id])
+        self.assertEqual(resp.status, "auto_attempted")
+
 
 if __name__ == "__main__":
     unittest.main()
+
