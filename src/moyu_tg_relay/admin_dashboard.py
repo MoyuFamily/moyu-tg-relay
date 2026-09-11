@@ -497,19 +497,30 @@ def render_admin_html() -> str:
       background: rgba(0, 0, 0, 0.75);
       backdrop-filter: blur(8px);
       -webkit-backdrop-filter: blur(8px);
-      display: flex;
+      display: none;
       align-items: center;
       justify-content: center;
       z-index: 999;
       padding: 20px;
       opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s ease;
     }
 
     .modal-backdrop.open {
-      opacity: 1;
+      display: flex !important;
+      opacity: 1 !important;
       pointer-events: auto;
+      animation: modalFadeIn 0.2s ease-out;
+    }
+
+    @keyframes modalFadeIn {
+      from {
+        opacity: 0;
+        transform: scale(0.98);
+      }
+      to {
+        opacity: 1;
+        transform: scale(1);
+      }
     }
 
     .modal-dialog {
@@ -908,7 +919,7 @@ def render_admin_html() -> str:
   </main>
 
   <!-- Login Modal (Full Web-Standard Autofill Support) -->
-  <div class="modal-backdrop" id="modal-login">
+  <div class="modal-backdrop" id="modal-login" style="display: none;">
     <div class="login-card">
       <h2>🔑 Moyu Relay 运维控制台</h2>
       <p class="sub">请输入 Relay Bearer Token 验证访问权限</p>
@@ -925,6 +936,7 @@ def render_admin_html() -> str:
             value="relay"
             placeholder="relay"
             required
+            disabled
             spellcheck="false"
           />
         </div>
@@ -938,6 +950,7 @@ def render_admin_html() -> str:
             autocomplete="current-password"
             placeholder="输入 OTP_RELAY_BEARER_TOKEN"
             required
+            disabled
             spellcheck="false"
           />
         </div>
@@ -957,7 +970,7 @@ def render_admin_html() -> str:
   </div>
 
   <!-- Detail Modal -->
-  <div class="modal-backdrop" id="modal-detail">
+  <div class="modal-backdrop" id="modal-detail" style="display: none;">
     <div class="modal-dialog">
       <div class="modal-header">
         <div class="modal-title">📄 结构化日志详情</div>
@@ -1105,6 +1118,9 @@ def render_admin_html() -> str:
 
       // Auth modal control
       function showLoginModal(errorText = "") {
+        inputUsername.disabled = false;
+        inputPassword.disabled = false;
+        modalLogin.style.display = "flex";
         modalLogin.classList.add("open");
         if (errorText) {
           loginErrorMsg.textContent = errorText;
@@ -1112,12 +1128,16 @@ def render_admin_html() -> str:
         } else {
           loginErrorMsg.style.display = "none";
         }
-        inputPassword.focus();
+        setTimeout(() => inputPassword.focus(), 50);
       }
 
       function hideLoginModal() {
         modalLogin.classList.remove("open");
+        modalLogin.style.display = "none";
+        inputUsername.disabled = true;
+        inputPassword.disabled = true;
         loginErrorMsg.style.display = "none";
+        inputPassword.value = "";
       }
 
       // Load initial token: URL query parameter > localStorage > prompt
@@ -1127,7 +1147,6 @@ def render_admin_html() -> str:
 
         if (urlToken) {
           currentToken = urlToken.trim();
-          inputPassword.value = currentToken;
           // Clear query parameter from URL to prevent credential leaking in history
           window.history.replaceState(null, "", window.location.pathname);
           verifyAndLoad(currentToken, true);
@@ -1137,7 +1156,6 @@ def render_admin_html() -> str:
         const saved = localStorage.getItem(STORAGE_KEY);
         if (saved) {
           currentToken = saved.trim();
-          inputPassword.value = currentToken;
           verifyAndLoad(currentToken, false);
           return;
         }
@@ -1386,12 +1404,18 @@ def render_admin_html() -> str:
           extraJsonElem.textContent = String(item.extra);
         }
 
+        modalDetail.style.display = "flex";
         modalDetail.classList.add("open");
       }
 
-      btnCloseDetail.addEventListener("click", () => modalDetail.classList.remove("open"));
+      function closeDetailModal() {
+        modalDetail.classList.remove("open");
+        modalDetail.style.display = "none";
+      }
+
+      btnCloseDetail.addEventListener("click", closeDetailModal);
       modalDetail.addEventListener("click", (e) => {
-        if (e.target === modalDetail) modalDetail.classList.remove("open");
+        if (e.target === modalDetail) closeDetailModal();
       });
 
       btnCopyDetail.addEventListener("click", () => {
