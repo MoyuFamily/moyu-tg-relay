@@ -62,6 +62,8 @@ TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
 store = PendingOtpStore()
 providers: dict[str, TelegramProvider] = build_provider_registry()
 telegram: Optional[TelegramClient] = None
+session_account_phone: str = ""
+session_account_username: str = ""
 
 
 class CreateRequest(BaseModel):
@@ -328,6 +330,9 @@ async def lifespan(_app: FastAPI):
         raise RuntimeError(
             "TELEGRAM_ACCOUNT_ID does not match the authorised Telegram session"
         )
+    global session_account_phone, session_account_username
+    session_account_phone = str(getattr(me, "phone", "") or "").strip()
+    session_account_username = str(getattr(me, "username", "") or "").strip().lower()
     telegram.add_event_handler(_handle_telegram_message, events.NewMessage(incoming=True))
     session_mode = "string" if TELEGRAM_SESSION_STRING else "file"
     provider_names = ",".join(sorted(providers))
@@ -370,6 +375,51 @@ def readyz() -> dict[str, str]:
     return {"status": "ready"}
 
 
+def _is_matching_account(supplied: str) -> bool:
+    target = str(supplied or "").strip()
+    if not target:
+        return False
+    if TELEGRAM_ACCOUNT_ID and target == TELEGRAM_ACCOUNT_ID:
+        return True
+
+    # 1. Phone number comparison (digits-only, supporting international/local formatting)
+    phone_candidates: list[str] = []
+    if session_account_phone:
+        phone_candidates.append(session_account_phone)
+    env_phone = os.environ.get("TELEGRAM_PHONE", "").strip()
+    if env_phone:
+        phone_candidates.append(env_phone)
+
+    supplied_digits = "".join(c for c in target if c.isdigit())
+    if supplied_digits:
+        for p in phone_candidates:
+            p_digits = "".join(c for c in str(p or "") if c.isdigit())
+            if not p_digits:
+                continue
+            if supplied_digits == p_digits:
+                return True
+            if len(supplied_digits) >= 8 and len(p_digits) >= 8:
+                if supplied_digits.endswith(p_digits) or p_digits.endswith(supplied_digits):
+                    return True
+
+    # 2. Username comparison (case-insensitive, optional @)
+    user_candidates: list[str] = []
+    if session_account_username:
+        user_candidates.append(session_account_username)
+    env_user = os.environ.get("TELEGRAM_USERNAME", "").strip().lower()
+    if env_user:
+        user_candidates.append(env_user)
+
+    clean_supplied_user = target.lstrip("@").lower()
+    if clean_supplied_user:
+        for u in user_candidates:
+            clean_u = str(u or "").strip().lstrip("@").lower()
+            if clean_u and clean_supplied_user == clean_u:
+                return True
+
+    return False
+
+
 @app.post(
     "/v1/otp/requests",
     response_model=CreateResponse,
@@ -379,10 +429,11 @@ def create_request(payload: CreateRequest) -> CreateResponse:
     provider_name = payload.provider.strip().lower()
     if _provider_for(provider_name) is None:
         raise HTTPException(status_code=400, detail="unsupported provider")
-    if payload.account.strip() != TELEGRAM_ACCOUNT_ID:
+    if not _is_matching_account(payload.account):
         raise HTTPException(status_code=403, detail="account does not match relay session")
+    account_key = TELEGRAM_ACCOUNT_ID or payload.account.strip()
     request = store.create(
-        payload.account,
+        account_key,
         payload.ttl_seconds,
         context=payload.context,
         provider=provider_name,

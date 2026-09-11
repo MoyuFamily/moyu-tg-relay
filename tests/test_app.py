@@ -135,5 +135,62 @@ class MoyuTgRelayAppTests(unittest.TestCase):
             self.assertEqual(client.session.server_address, "2001:b28:f23f:f005::a")
 
 
+    def test_is_matching_account_accepts_id_phone_and_username(self):
+        with (
+            patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "6812345678"),
+            patch.object(relay_app, "session_account_phone", "8619157902891"),
+            patch.object(relay_app, "session_account_username", "my_bot_user"),
+        ):
+            # 1. Exact numeric account ID
+            self.assertTrue(relay_app._is_matching_account("6812345678"))
+
+            # 2. International phone formats
+            self.assertTrue(relay_app._is_matching_account("+8619157902891"))
+            self.assertTrue(relay_app._is_matching_account("8619157902891"))
+            self.assertTrue(relay_app._is_matching_account("+86 191 5790 2891"))
+            self.assertTrue(relay_app._is_matching_account("19157902891"))
+
+            # 3. Username with or without @
+            self.assertTrue(relay_app._is_matching_account("my_bot_user"))
+            self.assertTrue(relay_app._is_matching_account("@my_bot_user"))
+            self.assertTrue(relay_app._is_matching_account("MY_BOT_USER"))
+
+            # 4. Reject mismatching accounts
+            self.assertFalse(relay_app._is_matching_account("9999999999"))
+            self.assertFalse(relay_app._is_matching_account("+8613800138000"))
+            self.assertFalse(relay_app._is_matching_account("other_user"))
+            self.assertFalse(relay_app._is_matching_account(""))
+
+    def test_create_request_accepts_phone_and_normalizes_to_account_id(self):
+        store = relay_app.PendingOtpStore()
+        payload = relay_app.CreateRequest(provider="hax", account="+8619157902891")
+
+        with (
+            patch.object(relay_app, "store", store),
+            patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "6812345678"),
+            patch.object(relay_app, "session_account_phone", "8619157902891"),
+        ):
+            resp = relay_app.create_request(payload)
+
+        self.assertTrue(resp.request_id)
+        # Verify it is registered under canonical TELEGRAM_ACCOUNT_ID so listener finds it
+        active = store.active_request("6812345678")
+        self.assertIsNotNone(active)
+        self.assertEqual(active.request_id, resp.request_id)
+
+    def test_create_request_rejects_unmatched_account_with_403(self):
+        store = relay_app.PendingOtpStore()
+        payload = relay_app.CreateRequest(provider="hax", account="+8613800138000")
+
+        with (
+            patch.object(relay_app, "store", store),
+            patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "6812345678"),
+            patch.object(relay_app, "session_account_phone", "8619157902891"),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                relay_app.create_request(payload)
+            self.assertEqual(ctx.exception.status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main()
