@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
@@ -5,7 +7,7 @@ import secrets
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Union
 
 
 ACTIVE_STATUSES = frozenset({"pending", "auto_attempted", "human_required", "ready"})
@@ -45,7 +47,7 @@ class PendingOtpStore:
         self,
         *,
         clock=time.time,
-        persistence_path: Optional[str | Path] = None,
+        persistence_path: Optional[Union[str, Path]] = None,
     ) -> None:
         self._clock = clock
         self._lock = threading.RLock()
