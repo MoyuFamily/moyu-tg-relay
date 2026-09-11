@@ -62,6 +62,38 @@ class RelayStoreTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             store.get(request.request_id)
 
+    def test_store_persistence_survives_reinitialization(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "state" / "otp_store.json"
+            store_a = PendingOtpStore(persistence_path=file_path)
+            req = store_a.create("123", 300, provider="hax", context={"stage": "login"})
+            self.assertTrue(file_path.is_file())
+
+            # Simulate service restart: new store instance loading from same file
+            store_b = PendingOtpStore(persistence_path=file_path)
+            loaded = store_b.get(req.request_id)
+            self.assertEqual(loaded.request_id, req.request_id)
+            self.assertEqual(loaded.provider, "hax")
+            self.assertEqual(loaded.account, "123")
+            self.assertEqual(loaded.status, "pending")
+            self.assertEqual(loaded.context.get("stage"), "login")
+
+            # Active request can be retrieved and updated by store_b
+            active = store_b.active_request("123")
+            self.assertIsNotNone(active)
+            self.assertEqual(active.request_id, req.request_id)
+
+            store_b.attach_code(account="123", code="888999")
+            self.assertEqual(store_b.get(req.request_id).status, "ready")
+
+            # Re-read to verify update persisted
+            store_c = PendingOtpStore(persistence_path=file_path)
+            self.assertEqual(store_c.get(req.request_id).status, "ready")
+            self.assertEqual(store_c.consume(req.request_id), "888999")
+
 
 if __name__ == "__main__":
     unittest.main()

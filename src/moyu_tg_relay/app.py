@@ -58,8 +58,11 @@ TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
 TELEGRAM_SESSION_STRING = os.environ.get("TELEGRAM_SESSION_STRING", "").strip()
 TELEGRAM_SESSION_PATH = _resolve_session_path()
 TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
-
-store = PendingOtpStore()
+OTP_STORE_FILE = os.environ.get(
+    "OTP_STORE_FILE",
+    "./.state/pending_otp_store.json",
+).strip()
+store = PendingOtpStore(persistence_path=OTP_STORE_FILE)
 providers: dict[str, TelegramProvider] = build_provider_registry()
 telegram: Optional[TelegramClient] = None
 session_account_phone: str = ""

@@ -1,11 +1,10 @@
-"""Generic in-memory short-lived interaction store."""
-
-from __future__ import annotations
-
+import json
+import os
+from pathlib import Path
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Optional
 
 
@@ -42,19 +41,69 @@ def _normalize_context(context: Optional[Mapping[str, Any]]) -> dict[str, str]:
 class PendingOtpStore:
     """Thread-safe TTL store with one active interaction per Telegram account."""
 
-    def __init__(self, *, clock=time.time) -> None:
+    def __init__(
+        self,
+        *,
+        clock=time.time,
+        persistence_path: Optional[str | Path] = None,
+    ) -> None:
         self._clock = clock
         self._lock = threading.RLock()
         self._items: dict[str, PendingOtp] = {}
+        self._persistence_path = Path(persistence_path) if persistence_path else None
+        if self._persistence_path:
+            with self._lock:
+                self._load_locked()
 
-    def _expire_locked(self) -> None:
+    def _load_locked(self) -> None:
+        if not self._persistence_path or not self._persistence_path.is_file():
+            return
+        try:
+            content = self._persistence_path.read_text(encoding="utf-8")
+            if not content.strip():
+                return
+            data = json.loads(content)
+            if isinstance(data, list):
+                for item_dict in data:
+                    if isinstance(item_dict, dict) and "request_id" in item_dict:
+                        item = PendingOtp(
+                            request_id=str(item_dict["request_id"]),
+                            provider=str(item_dict.get("provider", "generic")),
+                            account=str(item_dict.get("account", "")),
+                            created_at=float(item_dict.get("created_at", 0.0)),
+                            expires_at=float(item_dict.get("expires_at", 0.0)),
+                            status=str(item_dict.get("status", "pending")),
+                            code=str(item_dict.get("code", "")),
+                            detail=str(item_dict.get("detail", "")),
+                            context=_normalize_context(item_dict.get("context")),
+                        )
+                        self._items[item.request_id] = item
+                self._expire_locked(save=False)
+        except Exception:
+            pass
+
+    def _save_locked(self) -> None:
+        if not self._persistence_path:
+            return
+        try:
+            self._persistence_path.parent.mkdir(parents=True, exist_ok=True)
+            data = [asdict(item) for item in self._items.values()]
+            tmp_path = self._persistence_path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(self._persistence_path)
+        except Exception:
+            pass
+
+    def _expire_locked(self, *, save: bool = True) -> None:
         now = self._clock()
+        changed = False
         stale_request_ids: list[str] = []
         for request_id, item in self._items.items():
             if item.status in ACTIVE_STATUSES and now >= item.expires_at:
                 item.status = "expired"
                 item.code = ""
                 item.detail = ""
+                changed = True
             if (
                 item.status in TERMINAL_STATUSES
                 and now >= item.expires_at + TERMINAL_RETENTION_SECONDS
@@ -62,6 +111,9 @@ class PendingOtpStore:
                 stale_request_ids.append(request_id)
         for request_id in stale_request_ids:
             del self._items[request_id]
+            changed = True
+        if changed and save:
+            self._save_locked()
 
     def create(
         self,
@@ -97,6 +149,7 @@ class PendingOtpStore:
                 context=_normalize_context(context),
             )
             self._items[request.request_id] = request
+            self._save_locked()
             return request
 
     def get(self, request_id: str) -> PendingOtp:
@@ -136,6 +189,7 @@ class PendingOtpStore:
                 return item.request_id
             item.status = "auto_attempted"
             item.detail = str(detail or "").strip()[:300]
+            self._save_locked()
             return item.request_id
 
     def mark_human_required(self, *, account: str, detail: str = "") -> str:
@@ -149,6 +203,7 @@ class PendingOtpStore:
                 return item.request_id
             item.status = "human_required"
             item.detail = str(detail or "").strip()[:300]
+            self._save_locked()
             return item.request_id
 
     def attach_code(self, *, account: str, code: str) -> str:
@@ -165,6 +220,7 @@ class PendingOtpStore:
             item.code = normalized_code
             item.detail = ""
             item.status = "ready"
+            self._save_locked()
             return item.request_id
 
     def consume(self, request_id: str) -> str:
@@ -176,6 +232,7 @@ class PendingOtpStore:
             item.code = ""
             item.detail = ""
             item.status = "consumed"
+            self._save_locked()
             return code
 
     def cancel(self, request_id: str) -> None:
@@ -185,6 +242,7 @@ class PendingOtpStore:
                 item.status = "cancelled"
                 item.code = ""
                 item.detail = ""
+                self._save_locked()
 
 
 __all__ = ["ACTIVE_STATUSES", "PendingOtp", "PendingOtpStore"]

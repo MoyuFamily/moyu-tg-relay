@@ -12,7 +12,12 @@ from .base import IncomingMessage, ProviderDecision
 
 CODE_PATTERN = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
 CODE_HINTS = ("verification", "verify", "code", "renew")
-PROGRAMMATIC_BUTTON_TYPES = frozenset({"KeyboardButton", "KeyboardButtonCallback"})
+DEFAULT_CONFIRM_BUTTONS = (
+    "confirm,approve,authorize,accept,yes,continue,确认,允许,授权,同意,是,登录,确定"
+)
+PROGRAMMATIC_BUTTON_TYPES = frozenset(
+    {"KeyboardButton", "KeyboardButtonCallback", "KeyboardButtonUrlAuth", "MessageButton"}
+)
 
 
 def _csv_values(name: str, default: str) -> tuple[str, ...]:
@@ -39,7 +44,9 @@ def _button_type_name(button: Any) -> str:
     if explicit:
         return explicit
     original = getattr(button, "button", None)
-    return type(original).__name__ if original is not None else "unknown"
+    if original is not None:
+        return type(original).__name__
+    return type(button).__name__
 
 
 def _is_programmatically_clickable(button: Any) -> bool:
@@ -57,7 +64,21 @@ class HaxProvider:
     confirmation_sender_ids: frozenset[str] = frozenset({"777000"})
     confirmation_markers: tuple[str, ...] = ("hax.co.id", "hax")
     auto_confirm_buttons: frozenset[str] = frozenset(
-        {"confirm", "approve", "authorize", "accept", "yes", "continue"}
+        {
+            "confirm",
+            "approve",
+            "authorize",
+            "accept",
+            "yes",
+            "continue",
+            "确认",
+            "允许",
+            "授权",
+            "同意",
+            "是",
+            "登录",
+            "确定",
+        }
     )
 
     @classmethod
@@ -78,7 +99,7 @@ class HaxProvider:
             item.lower()
             for item in _csv_values(
                 "HAX_AUTO_CONFIRM_BUTTONS",
-                "confirm,approve,authorize,accept,yes,continue",
+                DEFAULT_CONFIRM_BUTTONS,
             )
         )
         return cls(
