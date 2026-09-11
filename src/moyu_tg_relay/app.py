@@ -15,11 +15,14 @@ from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from telethon import TelegramClient, events
 from telethon.sessions import SQLiteSession, StringSession
 from telethon.sessions.abstract import Session
 
+from .admin_dashboard import render_admin_html
+from .log_store import RelayLogStore
 from .providers import IncomingMessage, TelegramProvider, build_provider_registry
 from .store import PendingOtpStore
 
@@ -62,7 +65,13 @@ OTP_STORE_FILE = os.environ.get(
     "OTP_STORE_FILE",
     "./.state/pending_otp_store.json",
 ).strip()
+RELAY_LOG_DB_PATH = os.environ.get(
+    "RELAY_LOG_DB_PATH",
+    str(Path(OTP_STORE_FILE).parent / "relay_logs.db"),
+).strip()
+LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "15") or 15)
 store = PendingOtpStore(persistence_path=OTP_STORE_FILE)
+log_store = RelayLogStore(db_path=RELAY_LOG_DB_PATH, retention_days=LOG_RETENTION_DAYS)
 providers: dict[str, TelegramProvider] = build_provider_registry()
 telegram: Optional[TelegramClient] = None
 session_account_phone: str = ""
@@ -229,6 +238,15 @@ def _mark_human_required(detail: str, *, provider_name: str) -> None:
             f"[interaction-relay] {provider_name} interaction requires human fallback "
             f"for {request_id[:8]}…"
         )
+    log_store.record(
+        level="WARNING",
+        category="provider",
+        message=f"{provider_name} 交互需要人工干预: {detail}",
+        provider=provider_name,
+        account=TELEGRAM_ACCOUNT_ID,
+        request_id=request_id or "",
+        detail=detail,
+    )
 
 
 async def _process_incoming_telegram_message(
@@ -256,6 +274,16 @@ async def _process_incoming_telegram_message(
     decision = provider.evaluate(message, request)
 
     if decision.action == "ignore":
+        log_store.record(
+            level="DEBUG",
+            category="provider",
+            message=f"{provider.name} 评估消息并忽略",
+            provider=provider.name,
+            account=TELEGRAM_ACCOUNT_ID,
+            request_id=request.request_id,
+            detail="ignore",
+            extra={"sender_username": sender_username, "sender_id": sender_id},
+        )
         return False
 
     if decision.action == "code":
@@ -268,6 +296,16 @@ async def _process_incoming_telegram_message(
                 f"[interaction-relay] {provider.name} code attached to "
                 f"{request_id[:8]}…"
             )
+        log_store.record(
+            level="INFO",
+            category="provider",
+            message=f"捕获到 {provider.name} 验证码: {decision.code[:2]}***{decision.code[-2:] if len(decision.code) > 3 else ''}",
+            provider=provider.name,
+            account=TELEGRAM_ACCOUNT_ID,
+            request_id=request_id or request.request_id,
+            detail="code attached",
+            extra={"code_len": len(decision.code)},
+        )
         return True
 
     if decision.action == "human_required":
@@ -280,6 +318,18 @@ async def _process_incoming_telegram_message(
             provider_name=provider.name,
         )
         return True
+
+    btn_text = getattr(decision.button, "text", "")
+    log_store.record(
+        level="INFO",
+        category="provider",
+        message=f"准备自动点击 {provider.name} 确认按钮: {btn_text}",
+        provider=provider.name,
+        account=TELEGRAM_ACCOUNT_ID,
+        request_id=request.request_id,
+        detail=decision.detail,
+        extra={"button_text": btn_text},
+    )
 
     try:
         await decision.button.click()
@@ -299,19 +349,47 @@ async def _process_incoming_telegram_message(
             f"[interaction-relay] automatic {provider.name} interaction attempted "
             f"for {request_id[:8]}…"
         )
+    log_store.record(
+        level="INFO",
+        category="provider",
+        message=f"已成功自动点击 {provider.name} 确认按钮: {btn_text}",
+        provider=provider.name,
+        account=TELEGRAM_ACCOUNT_ID,
+        request_id=request_id or request.request_id,
+        detail=decision.detail,
+    )
     return True
 
 
 async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
     request = store.active_request(TELEGRAM_ACCOUNT_ID)
-    if request is None:
-        return
-
     sender = await event.get_sender()
     sender_username = str(getattr(sender, "username", "") or "").lower()
     sender_id = str(getattr(sender, "id", "") or "")
     text = str(getattr(event, "raw_text", "") or "")
     buttons = _iter_message_buttons(event)
+    btn_labels = [getattr(b, "text", "") for b in buttons if hasattr(b, "text")]
+
+    # Record message in log store for full transparency
+    log_store.record(
+        level="INFO",
+        category="telegram",
+        message=f"收到来自 @{sender_username or sender_id} 的 Telegram 消息 (按钮数: {len(buttons)})",
+        account=TELEGRAM_ACCOUNT_ID,
+        request_id=request.request_id if request else "",
+        provider=request.provider if request else "",
+        detail=f"buttons={len(buttons)}",
+        extra={
+            "sender_username": sender_username,
+            "sender_id": sender_id,
+            "buttons": btn_labels,
+            "text_snippet": text[:300],
+            "has_active_request": request is not None,
+        },
+    )
+
+    if request is None:
+        return
 
     await _process_incoming_telegram_message(
         sender_username=sender_username,
@@ -363,6 +441,15 @@ async def _poll_pending_interaction(request: PendingOtp) -> None:
                     return
         except Exception as error:
             print(f"[interaction-relay] active poll error for {target}: {error}")
+            log_store.record(
+                level="WARNING",
+                category="telegram",
+                message=f"主动轮询 {target} 异常: {error}",
+                provider=request.provider,
+                account=TELEGRAM_ACCOUNT_ID,
+                request_id=request.request_id,
+                detail=str(error),
+            )
 
 
 @asynccontextmanager
@@ -410,9 +497,32 @@ async def lifespan(_app: FastAPI):
         f"[interaction-relay] Telegram session ready ({session_mode}, {ip_mode}); "
         f"providers={provider_names}"
     )
+    # Prune expired logs on startup
+    pruned_count = log_store.prune()
+    log_store.record(
+        level="INFO",
+        category="system",
+        message=f"Telegram 会话就绪 ({session_mode}, {ip_mode}); providers={provider_names}",
+        account=TELEGRAM_ACCOUNT_ID,
+        detail=f"startup_pruned={pruned_count}",
+        extra={
+            "session_mode": session_mode,
+            "ip_mode": ip_mode,
+            "providers": sorted(providers.keys()),
+            "phone": session_account_phone,
+            "username": session_account_username,
+            "retention_days": LOG_RETENTION_DAYS,
+        },
+    )
     try:
         yield
     finally:
+        log_store.record(
+            level="INFO",
+            category="system",
+            message="Telegram Relay 服务正在关闭...",
+            account=TELEGRAM_ACCOUNT_ID,
+        )
         await telegram.disconnect()
         telegram = None
 
@@ -507,6 +617,16 @@ def create_request(payload: CreateRequest) -> CreateResponse:
         context=payload.context,
         provider=provider_name,
     )
+    log_store.record(
+        level="INFO",
+        category="otp_request",
+        message=f"创建 OTP 交互请求: {provider_name} ({account_key})",
+        provider=provider_name,
+        account=account_key,
+        request_id=request.request_id,
+        detail=f"ttl={payload.ttl_seconds}s",
+        extra={"context": payload.context, "expires_in": payload.ttl_seconds},
+    )
     return CreateResponse(
         request_id=request.request_id,
         expires_in=max(0, int(request.expires_at - request.created_at)),
@@ -542,6 +662,13 @@ async def request_status(request_id: str) -> StatusResponse:
 def consume_request(request_id: str) -> ConsumeResponse:
     try:
         code = store.consume(request_id)
+        log_store.record(
+            level="INFO",
+            category="otp_request",
+            message=f"消费验证码成功: {request_id[:12]}…",
+            request_id=request_id,
+            detail="code consumed",
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail="request not found") from error
     except ValueError as error:
@@ -558,9 +685,103 @@ def consume_request(request_id: str) -> ConsumeResponse:
 def cancel_request(request_id: str) -> Response:
     try:
         store.cancel(request_id)
+        log_store.record(
+            level="INFO",
+            category="otp_request",
+            message=f"取消交互请求: {request_id[:12]}…",
+            request_id=request_id,
+            detail="cancelled by client",
+        )
         return Response(status_code=204)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="request not found") from error
 
 
-__all__ = ["app", "providers", "store"]
+# --- Admin Dashboard & Observability Endpoints ---
+
+
+@app.get("/admin", response_class=HTMLResponse)
+@app.get("/admin/", response_class=HTMLResponse)
+def admin_dashboard_ui() -> HTMLResponse:
+    """Serve the modern web admin console."""
+    return HTMLResponse(content=render_admin_html())
+
+
+@app.get("/api/admin/verify", dependencies=[Depends(require_auth)])
+def admin_verify() -> dict[str, Any]:
+    """Verify administrator Bearer authentication token."""
+    return {
+        "status": "ready" if _telegram_ready() else "not_ready",
+        "account_id": TELEGRAM_ACCOUNT_ID,
+        "phone": session_account_phone,
+        "username": session_account_username,
+    }
+
+
+@app.get("/api/admin/stats", dependencies=[Depends(require_auth)])
+def admin_stats() -> dict[str, Any]:
+    """Aggregate overview metrics and runtime telemetry."""
+    stats = log_store.get_stats()
+    session_mode = "string" if TELEGRAM_SESSION_STRING else "file"
+    dc_info = ""
+    if telegram and getattr(telegram, "session", None):
+        dc_info = f"DC {getattr(telegram.session, 'dc_id', '-')}"
+        addr = getattr(telegram.session, "server_address", "")
+        if addr:
+            dc_info += f" ({addr})"
+    stats["session_mode"] = session_mode
+    stats["dc_info"] = dc_info
+    stats["telegram"] = {
+        "status": "ready" if _telegram_ready() else "not_ready",
+        "account_id": TELEGRAM_ACCOUNT_ID,
+        "phone": session_account_phone,
+        "username": session_account_username,
+    }
+    return stats
+
+
+@app.get("/api/admin/logs", dependencies=[Depends(require_auth)])
+def admin_query_logs(
+    page: int = 1,
+    page_size: int = 50,
+    level: Optional[str] = None,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    provider: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Query paginated logs with multi-condition filters."""
+    return log_store.query_logs(
+        page=page,
+        page_size=page_size,
+        level=level,
+        category=category,
+        search=search,
+        since=since,
+        until=until,
+        provider=provider,
+        request_id=request_id,
+    )
+
+
+class PrunePayload(BaseModel):
+    days: Optional[int] = None
+
+
+@app.post("/api/admin/logs/prune", dependencies=[Depends(require_auth)])
+def admin_prune_logs(payload: Optional[PrunePayload] = None) -> dict[str, int]:
+    """Prune logs older than configured or specified retention days."""
+    days = payload.days if (payload and payload.days) else LOG_RETENTION_DAYS
+    deleted = log_store.prune(retention_days=days)
+    log_store.record(
+        level="INFO",
+        category="system",
+        message=f"执行日志手动清理，已清除 {deleted} 条超过 {days} 天的历史记录",
+        detail=f"deleted={deleted}, retention_days={days}",
+    )
+    return {"deleted": deleted}
+
+
+__all__ = ["app", "log_store", "providers", "store"]

@@ -121,18 +121,26 @@ class MoyuTgRelayAppTests(unittest.TestCase):
                     self.assertEqual(adapted.port, 443)
 
     def test_telegram_client_preserves_dc5_on_ipv6_connect(self):
-        session = relay_app.StringSession()
-        session.set_dc(5, "149.154.171.5", 443)
-        with patch.object(relay_app, "_telegram_session", return_value=session):
-            adapted = relay_app._prepare_telegram_session(use_ipv6=True)
-            client = relay_app.TelegramClient(
-                adapted,
-                12345,
-                "test_hash",
-                use_ipv6=True,
-            )
-            self.assertEqual(client.session.dc_id, 5)
-            self.assertEqual(client.session.server_address, "2001:b28:f23f:f005::a")
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            session = relay_app.StringSession()
+            session.set_dc(5, "149.154.171.5", 443)
+            with patch.object(relay_app, "_telegram_session", return_value=session):
+                adapted = relay_app._prepare_telegram_session(use_ipv6=True)
+                client = relay_app.TelegramClient(
+                    adapted,
+                    12345,
+                    "test_hash",
+                    use_ipv6=True,
+                    loop=loop,
+                )
+                self.assertEqual(client.session.dc_id, 5)
+                self.assertEqual(client.session.server_address, "2001:b28:f23f:f005::a")
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
 
 
     def test_is_matching_account_accepts_id_phone_and_username(self):

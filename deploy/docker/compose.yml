@@ -12,6 +12,9 @@ services:
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}
       TELEGRAM_ACCOUNT_ID: ${TELEGRAM_ACCOUNT_ID:-}
       TELEGRAM_SESSION_PATH: /data/telegram.session
+      OTP_STORE_FILE: /data/pending_otp_store.json
+      RELAY_LOG_DB_PATH: /data/relay_logs.db
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-15}
       PYTHONUNBUFFERED: "1"
 
       # Built-in Provider: Hax (Optional)

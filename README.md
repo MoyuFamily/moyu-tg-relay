@@ -339,12 +339,40 @@ OTP_RELAY_TOKEN=<OTP_RELAY_BEARER_TOKEN>
 
 ---
 
+## 📊 运维管理后台与 15 天审计日志 (`/admin`)
+
+`moyu-tg-relay` 内置开箱即用的现代化单页 Web 运维控制台，用于实时监控 Telegram 会话状态、排查自动确认细节与回溯历史交互。
+
+### 核心特性
+- 📅 **15 天滚动持久化**：基于 SQLite WAL 引擎存储全流程结构化事件（Telegram 消息、Provider 规则评估、按钮自动点击、OTP 请求创建与消费），自动定时滚动清理超过 15 天的历史记录；
+- 🔑 **密码管理器无缝兼容**：登录弹窗遵循 Web 标准语义表单设计，包含标准 `username` 与 `current-password` 标记，完美支持 **1Password、Bitwarden、Apple 钥匙串（iCloud Keychain）、Chrome / Edge / Safari** 自动填充与凭据保存；
+- ⚡ **实时多维检索**：支持按日志级别（INFO / WARN / ERROR）、分类（telegram / provider / otp_request / system / http）、Provider、时间跨度（1h / 6h / 24h / 7d / 15d）过滤，支持毫秒级关键字检索；
+- 🔍 **结构化详情滑出抽屉**：点击任意日志行即可查看详细的 JSON Context、原始 Telegram 消息正文与按钮标签快照；
+- 📥 **数据导出与清理**：支持一键导出过滤后的日志为 JSON 文件，支持手动触发过期清理。
+
+### 访问方式
+浏览器直接打开反向代理地址或本地地址：
+```text
+https://relay.example.com/admin
+```
+或带 Token 便捷跳转（系统载入后会自动清除 URL 中的 Token 参数，防止留在浏览器历史记录中）：
+```text
+https://relay.example.com/admin?token=<OTP_RELAY_BEARER_TOKEN>
+```
+
+---
+
 ## 📡 HTTP API 契约
 
 | 方法 | 路径 | 鉴权 | 描述 |
 | :--- | :--- | :---: | :--- |
 | `GET` | `/healthz` | 否 | 进程存活检查（Liveness） |
 | `GET` | `/readyz` | 否 | Telegram 连通性检查（Readiness，200=可用，503=未就绪） |
+| `GET` | `/admin` | 否* | 运维管理后台 Web 界面（*界面内部通过 Bearer Token 鉴权） |
+| `GET` | `/api/admin/verify` | 是 | 验证管理员 Bearer Token 并返回 Telegram 会话状态 |
+| `GET` | `/api/admin/stats` | 是 | 获取 15 天日志统计指标、吞吐概览与网络路由详情 |
+| `GET` | `/api/admin/logs` | 是 | 分页多条件查询持久化审计日志 |
+| `POST` | `/api/admin/logs/prune` | 是 | 手动清理指定天数（默认 15 天）的过期日志 |
 | `POST` | `/v1/otp/requests` | 是 | 创建等待交互请求（绑定 `provider` 与 `account`） |
 | `GET` | `/v1/otp/requests/{id}` | 是 | 查询交互状态与安全详情（不返回验证码） |
 | `POST` | `/v1/otp/requests/{id}/consume` | 是 | **一次性提取** 验证码（提取后立即失效） |
