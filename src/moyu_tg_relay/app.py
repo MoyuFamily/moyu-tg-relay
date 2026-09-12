@@ -70,22 +70,23 @@ def _resolve_state_dir() -> Path:
 STATE_DIR = _resolve_state_dir()
 
 
-def _resolve_session_path() -> str:
+def _resolve_session_path(state_dir: Optional[Path] = None) -> str:
+    base_state_dir = state_dir or _resolve_state_dir()
     explicit = os.environ.get("TELEGRAM_SESSION_PATH", "").strip()
     if explicit:
         p = Path(explicit)
         if not p.is_absolute() and (explicit.startswith("./.state") or explicit.startswith(".state")):
-            return str(STATE_DIR / p.name)
+            return str(base_state_dir / p.name)
         return explicit
     for candidate in (
-        STATE_DIR / "telegram.session",
-        STATE_DIR / "hax-telegram.session",
+        base_state_dir / "telegram.session",
+        base_state_dir / "hax-telegram.session",
         Path("./.state/telegram.session"),
         Path("./.state/hax-telegram.session"),
     ):
         if candidate.is_file():
             return str(candidate)
-    return str(STATE_DIR / "telegram.session")
+    return str(base_state_dir / "telegram.session")
 
 
 RELAY_TOKEN = os.environ.get("OTP_RELAY_BEARER_TOKEN", "").strip()
