@@ -101,6 +101,13 @@ RELAY_LOG_DB_PATH = os.environ.get(
     str(Path(OTP_STORE_FILE).parent / "relay_logs.db"),
 ).strip()
 LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "15") or 15)
+FILTER_CHAT_MESSAGES = os.environ.get("FILTER_CHAT_MESSAGES", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+SYSTEM_SENDER_IDS = frozenset({"777000", "42777"})
 store = PendingOtpStore(persistence_path=OTP_STORE_FILE)
 log_store = RelayLogStore(db_path=RELAY_LOG_DB_PATH, retention_days=LOG_RETENTION_DAYS)
 providers: dict[str, TelegramProvider] = build_provider_registry()
@@ -517,15 +524,103 @@ async def _process_incoming_telegram_message(
         )
 
 
+def _get_known_system_sender_ids() -> frozenset[str]:
+    ids = set(SYSTEM_SENDER_IDS)
+    for provider in providers.values():
+        for sid in getattr(provider, "confirmation_sender_ids", ()):
+            s = str(sid or "").strip()
+            if s:
+                ids.add(s)
+    return frozenset(ids)
+
+
+def _get_known_bot_usernames() -> frozenset[str]:
+    bots = set()
+    for provider in providers.values():
+        b = str(getattr(provider, "bot_username", "") or "").strip().lower().lstrip("@")
+        if b:
+            bots.add(b)
+    return frozenset(bots)
+
+
+async def _is_bot_or_system_event(event: Any) -> bool:
+    """Filter out regular chat messages (group chats, channels, 1-on-1 chats).
+
+    Only allows messages from bots and Telegram system notifications.
+    """
+    if not FILTER_CHAT_MESSAGES:
+        return True
+
+    # 1. Early rejection for groups, supergroups, and broadcast channels
+    if getattr(event, "is_group", False):
+        return False
+    if getattr(event, "is_channel", False):
+        return False
+    if getattr(event, "is_private", None) is False:
+        return False
+
+    system_ids = _get_known_system_sender_ids()
+
+    # 2. Check event-level sender_id if available
+    raw_sender_id = getattr(event, "sender_id", None)
+    if raw_sender_id is not None and str(raw_sender_id).strip() in system_ids:
+        return True
+
+    # 3. Retrieve sender entity
+    get_sender = getattr(event, "get_sender", None)
+    if callable(get_sender):
+        try:
+            sender = await get_sender()
+        except Exception:
+            sender = None
+    else:
+        sender = getattr(event, "sender", None)
+
+    if sender is None:
+        return raw_sender_id is not None and str(raw_sender_id).strip() in system_ids
+
+    # 4. Check sender ID against system IDs
+    sid = str(getattr(sender, "id", "") or "").strip()
+    if sid and sid in system_ids:
+        return True
+
+    # 5. Check if sender is a Bot
+    if getattr(sender, "bot", False) is True:
+        return True
+
+    # 6. Check official support or verified status
+    if getattr(sender, "support", False) is True or getattr(sender, "verified", False) is True:
+        return True
+
+    # 7. Check username suffix ('bot') or provider bot list
+    username = str(getattr(sender, "username", "") or "").strip().lower().lstrip("@")
+    if username:
+        if username.endswith("bot") or username in _get_known_bot_usernames():
+            return True
+
+    # Otherwise, it's a regular user chat (单聊)
+    return False
+
+
 async def _handle_telegram_message(
     event: events.NewMessage.Event,
     account_id: Optional[str] = None,
 ) -> None:
+    if FILTER_CHAT_MESSAGES and not await _is_bot_or_system_event(event):
+        return
+
     if isinstance(account_id, AccountRuntime):
         account_id = account_id.account_id
     account_key = str(account_id or TELEGRAM_ACCOUNT_ID).strip()
     request = store.active_request(account_key)
-    sender = await event.get_sender()
+    get_sender = getattr(event, "get_sender", None)
+    if callable(get_sender):
+        try:
+            sender = await get_sender()
+        except Exception:
+            sender = None
+    else:
+        sender = getattr(event, "sender", None)
     sender_username = str(getattr(sender, "username", "") or "").lower()
     sender_id = str(getattr(sender, "id", "") or "")
     text = str(getattr(event, "raw_text", "") or "")
@@ -668,7 +763,10 @@ async def lifespan(_app: FastAPI):
             runtime.identity = identity_from_me(config, me)
             runtime.status = "ready"
             handler = (lambda bound_id: (lambda event: _handle_telegram_message(event, bound_id)))(config.account_id)
-            client.add_event_handler(handler, events.NewMessage(incoming=True))
+            client.add_event_handler(
+                handler,
+                events.NewMessage(incoming=True, func=_is_bot_or_system_event),
+            )
             if config.account_id == TELEGRAM_ACCOUNT_ID or len(configs) == 1:
                 session_account_phone = runtime.identity.phone
                 session_account_username = runtime.identity.username
@@ -693,11 +791,12 @@ async def lifespan(_app: FastAPI):
             category="system",
             message=f"Telegram 会话就绪 ({len(configs)} accounts); providers={provider_names}",
             account=configs[0].account_id if configs else TELEGRAM_ACCOUNT_ID,
-            detail=f"startup_pruned={pruned_count}",
+            detail=f"startup_pruned={pruned_count}, filter_chat_messages={FILTER_CHAT_MESSAGES}",
             extra={
                 "account_count": len(configs),
                 "providers": sorted(providers.keys()),
                 "retention_days": LOG_RETENTION_DAYS,
+                "filter_chat_messages": FILTER_CHAT_MESSAGES,
             },
         )
     except BaseException:
