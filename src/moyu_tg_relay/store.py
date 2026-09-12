@@ -177,6 +177,17 @@ class PendingOtpStore:
             candidates = self._active_for_account_locked(account)
             return candidates[0] if len(candidates) == 1 else None
 
+    def active_requests_for_provider(self, provider: str) -> list[PendingOtp]:
+        """Return all active interactions currently registered for a provider."""
+        normalized_provider = str(provider or "").strip().lower()
+        with self._lock:
+            self._expire_locked()
+            return [
+                item
+                for item in self._items.values()
+                if item.provider == normalized_provider and item.status in ACTIVE_STATUSES
+            ]
+
     def has_active_request(self, account: str) -> bool:
         return self.active_request(account) is not None
 

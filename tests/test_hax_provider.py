@@ -14,6 +14,18 @@ class HaxProviderTests(unittest.TestCase):
             extract_verification_code("Your Hax verification code is 12345678"),
             "12345678",
         )
+        self.assertEqual(
+            extract_verification_code(
+                "Your Code is \nODgxMjQ0MTY3Nzo6OjMxZDJjNGU2MDM2Zjg0YmUxZjQwMmFkMjdlOTE3NDA3"
+            ),
+            "ODgxMjQ0MTY3Nzo6OjMxZDJjNGU2MDM2Zjg0YmUxZjQwMmFkMjdlOTE3NDA3",
+        )
+        self.assertEqual(
+            extract_verification_code(
+                "Your Code is\nODgxMjQ0MTY3Nzo6OmVjYWIwOWM0OGJiMzc4MGViM2QzMTNkYzliYTc1NDFk"
+            ),
+            "ODgxMjQ0MTY3Nzo6OmVjYWIwOWM0OGJiMzc4MGViM2QzMTNkYzliYTc1NDFk",
+        )
 
     def test_hax_provider_defaults(self):
         provider = HaxProvider.from_env()

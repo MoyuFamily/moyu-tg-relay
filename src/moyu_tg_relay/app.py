@@ -407,7 +407,7 @@ async def _process_incoming_telegram_message_unlocked(
 
     if decision.action == "code":
         request_id = store.attach_code(
-            account=account_key,
+            account=request.account,
             code=decision.code,
             request_id=request.request_id,
         )
@@ -421,7 +421,7 @@ async def _process_incoming_telegram_message_unlocked(
             category="provider",
             message=f"捕获到 {provider.name} 验证码: {decision.code[:2]}***{decision.code[-2:] if len(decision.code) > 3 else ''}",
             provider=provider.name,
-            account=account_key,
+            account=request.account,
             request_id=request_id or request.request_id,
             detail="code attached",
             extra={"code_len": len(decision.code)},
@@ -432,7 +432,7 @@ async def _process_incoming_telegram_message_unlocked(
         _mark_human_required(
             decision.detail,
             provider_name=provider.name,
-            account_id=account_key,
+            account_id=request.account,
             request_id=request.request_id,
         )
         return True
@@ -477,7 +477,7 @@ async def _process_incoming_telegram_message_unlocked(
         return True
 
     request_id = store.mark_auto_attempted(
-        account=account_key,
+        account=request.account,
         detail=decision.detail,
         request_id=request.request_id,
     )
@@ -491,7 +491,7 @@ async def _process_incoming_telegram_message_unlocked(
         category="provider",
         message=f"已成功自动点击 {provider.name} 确认按钮: {btn_text}",
         provider=provider.name,
-        account=account_key,
+        account=request.account,
         request_id=request_id or request.request_id,
         detail=decision.detail,
     )
@@ -631,6 +631,23 @@ async def _handle_telegram_message(
     buttons = _iter_message_buttons(event)
     btn_labels = [getattr(b, "text", "") for b in buttons if hasattr(b, "text")]
 
+    # If no request is active under the exact Telegram account ID, attempt
+    # resilient fallback matching when this sender uniquely matches one provider
+    # with exactly one active request.
+    if request is None:
+        matched_provider = None
+        for p in providers.values():
+            p_bot = str(getattr(p, "bot_username", "") or "").strip().lower().lstrip("@")
+            p_sids = set(str(s).strip() for s in getattr(p, "confirmation_sender_ids", ()))
+            if (p_bot and sender_username == p_bot) or (sender_id and sender_id in p_sids):
+                matched_provider = p.name
+                break
+
+        if matched_provider is not None:
+            active_for_p = store.active_requests_for_provider(matched_provider)
+            if len(active_for_p) == 1:
+                request = active_for_p[0]
+
     # Record message in log store for full transparency
     log_store.record(
         level="INFO",
@@ -658,7 +675,7 @@ async def _handle_telegram_message(
         text=text,
         buttons=buttons,
         request=request,
-        account_id=account_key,
+        account_id=request.account,
     )
 
 

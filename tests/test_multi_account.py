@@ -11,6 +11,7 @@ from fastapi import HTTPException
 import moyu_tg_relay.app as app
 from moyu_tg_relay.accounts import AccountConfig, AccountIdentity, AccountRuntime, load_account_configs
 from moyu_tg_relay.providers.base import ProviderDecision
+from moyu_tg_relay.providers.hax import HaxProvider
 from moyu_tg_relay.bootstrap_session import add_account, load_env_file
 
 
@@ -27,12 +28,13 @@ class Provider:
 class Message:
     date = None
 
-    def __init__(self, code, buttons=()):
+    def __init__(self, code, buttons=(), sender=None):
         self.raw_text = code
         self.buttons = [buttons] if buttons else []
+        self._sender = sender or SimpleNamespace(id=1234, username="test_bot")
 
     async def get_sender(self):
-        return SimpleNamespace(id=1234, username="test_bot")
+        return self._sender
 
 
 def config(uid):
@@ -82,7 +84,7 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
             client.is_connected.return_value = True
             client.get_messages = AsyncMock(return_value=[Message(f"code-{uid}")])
             self.registry[uid] = AccountRuntime(config(uid), client=client, identity=AccountIdentity(uid, username=f"user_{uid}"))
-        for key, value in {"store": self.store, "account_runtimes": self.registry, "accounts": self.registry, "runtimes": self.registry, "providers": {"custom": Provider()}, "log_store": MagicMock()}.items():
+        for key, value in {"store": self.store, "account_runtimes": self.registry, "accounts": self.registry, "runtimes": self.registry, "providers": {"custom": Provider(), "hax": HaxProvider.from_env()}, "log_store": MagicMock()}.items():
             self.stack.enter_context(patch.object(app, key, value))
 
     async def test_two_accounts_can_receive_and_consume_independently(self):
@@ -116,6 +118,21 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(req.status, "auto_attempted")
         await app._handle_telegram_message(Message("after-confirm"), "101")
         self.assertEqual(self.store.consume(req.request_id), "after-confirm")
+
+    async def test_hax_base64_code_and_resilient_routing(self):
+        # Request created under 101, but message from HaxTG_bot received on 202
+        req = self.store.create("101", provider="hax")
+        b64_msg = (
+            "Your Code is \n"
+            "ODgxMjQ0MTY3Nzo6OjMxZDJjNGU2MDM2Zjg0YmUxZjQwMmFkMjdlOTE3NDA3"
+        )
+        event = Message(b64_msg, sender=SimpleNamespace(username="HaxTG_bot", id=1967189265))
+        await app._handle_telegram_message(event, "202")
+        self.assertEqual(self.store.get(req.request_id).status, "ready")
+        self.assertEqual(
+            self.store.consume(req.request_id),
+            "ODgxMjQ0MTY3Nzo6OjMxZDJjNGU2MDM2Zjg0YmUxZjQwMmFkMjdlOTE3NDA3",
+        )
 
     def test_unknown_and_ambiguous_aliases_rejected(self):
         self.registry["101"].identity = AccountIdentity("101", username="shared")

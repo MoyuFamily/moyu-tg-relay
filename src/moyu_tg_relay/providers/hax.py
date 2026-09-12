@@ -10,6 +10,13 @@ from typing import Any
 from .base import IncomingMessage, ProviderDecision
 
 
+TOKEN_AFTER_LABEL_PATTERN = re.compile(
+    r"(?:your\s+code\s+is|verification\s+code\s+is|your\s+verification\s+code\s+is)[\s:\n\r]+([A-Za-z0-9+/=_-]{16,})",
+    re.IGNORECASE,
+)
+BASE64_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9+/=_-])([A-Za-z0-9+/=]{24,})(?![A-Za-z0-9+/=_-])"
+)
 CODE_PATTERN = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
 CODE_HINTS = ("verification", "verify", "code", "renew")
 DEFAULT_CONFIRM_BUTTONS = (
@@ -27,10 +34,24 @@ def _csv_values(name: str, default: str) -> tuple[str, ...]:
 
 def extract_verification_code(text: str) -> str:
     """Extract one plausible Hax verification code, failing closed on ambiguity."""
+    if not text:
+        return ""
     normalized = " ".join(str(text or "").split())
     lower = normalized.lower()
-    if not normalized or not any(hint in lower for hint in CODE_HINTS):
+    if not any(hint in lower for hint in CODE_HINTS):
         return ""
+
+    # 1. Match explicit "Your Code is \n<token>"
+    token_match = TOKEN_AFTER_LABEL_PATTERN.search(text)
+    if token_match:
+        return token_match.group(1).strip()
+
+    # 2. Check for single plausible Base64 token
+    b64_matches = list(dict.fromkeys(BASE64_TOKEN_PATTERN.findall(text)))
+    if len(b64_matches) == 1:
+        return b64_matches[0]
+
+    # 3. Classical 6-10 digit numeric codes (failing closed if ambiguous)
     candidates = list(dict.fromkeys(CODE_PATTERN.findall(normalized)))
     return candidates[0] if len(candidates) == 1 else ""
 
