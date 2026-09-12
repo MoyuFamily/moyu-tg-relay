@@ -8,9 +8,11 @@ services:
     environment:
       # Core Relay Settings
       OTP_RELAY_BEARER_TOKEN: ${OTP_RELAY_BEARER_TOKEN:?OTP_RELAY_BEARER_TOKEN is required}
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
       TELEGRAM_ACCOUNT_ID: ${TELEGRAM_ACCOUNT_ID:-}
+      TELEGRAM_SESSION_STRING: ${TELEGRAM_SESSION_STRING:-}
+      TELEGRAM_ACCOUNTS_JSON: ${TELEGRAM_ACCOUNTS_JSON:-}
       TELEGRAM_SESSION_PATH: /data/telegram.session
       OTP_STORE_FILE: /data/pending_otp_store.json
       RELAY_LOG_DB_PATH: /data/relay_logs.db

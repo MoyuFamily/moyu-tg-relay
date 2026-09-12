@@ -27,3 +27,7 @@ sudo ./deploy/install.sh systemd
 Relay runtime 始终只在 `127.0.0.1:8787` 提供本地 HTTP。公网访问必须通过 HTTPS reverse proxy；参考 [Caddyfile.example](Caddyfile.example)。
 
 不要直接把 8787 暴露到公网，也不要把 Telegram API Hash 或 Telethon `.session` 放入 GitHub Actions。
+
+## 多账号
+
+配置 `TELEGRAM_ACCOUNTS_JSON` 后，安装向导保留账号列表并跳过单账号授权。账号添加、renew 对应关系与 Session 路径要求见根目录 README 的“多账号与 moyu-renew”。更改配置后重启服务；`/readyz` 检查全部账号。

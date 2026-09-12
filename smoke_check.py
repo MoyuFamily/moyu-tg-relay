@@ -27,28 +27,84 @@ def _load_env_file(path: str) -> dict[str, str]:
     values: dict[str, str] = {}
     env_path = Path(path).expanduser()
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        text = env_path.read_text(encoding="utf-8")
     except OSError as error:
         raise RuntimeError(f"unable to read env file {env_path}: {error}") from error
 
-    for line_number, raw_line in enumerate(lines, start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+    idx = 0
+    length = len(text)
+    line_number = 1
+
+    while idx < length:
+        while idx < length and text[idx] in (" ", "\t", "\r"):
+            idx += 1
+        if idx >= length:
+            break
+        if text[idx] == "\n":
+            line_number += 1
+            idx += 1
             continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
-            raise RuntimeError(
-                f"invalid env file line {line_number}: expected KEY=VALUE"
-            )
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
+        if text[idx] == "#":
+            while idx < length and text[idx] != "\n":
+                idx += 1
+            continue
+
+        if text[idx:].startswith("export "):
+            idx += 7
+            while idx < length and text[idx] in (" ", "\t"):
+                idx += 1
+
+        eq_pos = text.find("=", idx)
+        nl_pos = text.find("\n", idx)
+        if eq_pos == -1 or (nl_pos != -1 and eq_pos > nl_pos):
+            raise RuntimeError(f"invalid env file line {line_number}: expected KEY=VALUE")
+
+        key = text[idx:eq_pos].strip()
         if not _ENV_KEY.fullmatch(key):
             raise RuntimeError(f"invalid env key on line {line_number}: {key!r}")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        values[key] = value
+
+        idx = eq_pos + 1
+        while idx < length and text[idx] in (" ", "\t"):
+            idx += 1
+
+        if idx >= length or text[idx] == "\n":
+            values[key] = ""
+            continue
+
+        first_char = text[idx]
+        if first_char in ("'", '"'):
+            quote = first_char
+            idx += 1
+            val_start = idx
+            while idx < length:
+                if text[idx] == quote:
+                    if quote == '"' and idx > val_start and text[idx - 1] == "\\":
+                        idx += 1
+                        continue
+                    val = text[val_start:idx]
+                    idx += 1
+                    while idx < length and text[idx] != "\n":
+                        idx += 1
+                    line_number += val.count("\n")
+                    values[key] = val
+                    break
+                elif text[idx] == "\n":
+                    line_number += 1
+                idx += 1
+            else:
+                raise RuntimeError(f"invalid env file line {line_number}: unclosed quote")
+        else:
+            end_line = text.find("\n", idx)
+            if end_line == -1:
+                val = text[idx:].strip()
+                idx = length
+            else:
+                val = text[idx:end_line].strip()
+                idx = end_line
+            if " #" in val:
+                val = val.split(" #", 1)[0].strip()
+            values[key] = val
+
     return values
 
 

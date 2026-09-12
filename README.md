@@ -176,6 +176,47 @@ TELEGRAM_SESSION_STRING=<secret-session-string>
 
 ---
 
+## 多账号与 moyu-renew
+
+同一 Relay 可以长期连接多个 Telegram 账号。每个账号独立处理消息、确认按钮和验证码；同一账号仍只保留一个活跃请求，新请求会取消该账号的旧请求。所有账号共用 Relay URL 与 Bearer Token。
+
+已有本地 `.env` 配置时，逐个添加账号：
+
+```bash
+python3 -m scripts.manager bootstrap --add-account
+# 或直接调用（API 凭据从 env 文件读取）
+python -m moyu_tg_relay.bootstrap_session --env-file .env --add-account
+```
+
+此命令把原有单账号配置迁移为列表，并保留已有账号及 Bearer Token；登录完成后原子写回 `.env`，不在终端打印 Session。首次使用需在 env 文件配置 `TELEGRAM_API_ID`、`TELEGRAM_API_HASH`，也可通过 `--api-id` / `--api-hash` 提供。文件 Session 可以额外指定一个新的 `--session-path`，每个账号必须使用不同路径。
+
+运行配置示例（占位值需替换，整个 JSON 属于 Secret）：
+
+```dotenv
+TELEGRAM_API_ID=12345678
+TELEGRAM_API_HASH=<api-hash>
+TELEGRAM_ACCOUNTS_JSON='[{"account_id":"111111111","session_string":"<session-one>"},{"account_id":"222222222","session_string":"<session-two>"}]'
+```
+
+每项可单独指定 `api_id` / `api_hash`，也可将 `session_string` 换为 `session_path`；两者都有时优先 StringSession。JSON 是完整账号列表，非空时覆盖单账号配置；未设置时兼容原有 `TELEGRAM_*`。无效 JSON、空列表、重复账号或重复 Session 会拒绝启动。每个 Session 的真实 Telegram ID 必须与 `account_id` 一致。修改配置后重启服务。
+
+在 renew 的 `USERS_JSON` 中为各条 Hax 记录指定对应 Telegram ID，其余原有续期字段照常保留：
+
+```json
+[
+  {"provider":"hax","username":"<hax-account-one>","telegram_account_id":"111111111"},
+  {"provider":"hax","username":"<hax-account-two>","telegram_account_id":"222222222"}
+]
+```
+
+两条记录共用 `HAX_OTP_RELAY_URL` / `HAX_OTP_RELAY_TOKEN`。不要依赖一个全局 `HAX_TELEGRAM_ACCOUNT_ID` 为不同 Telegram 账号路由；优先逐条显式配置 `telegram_account_id`。现有 `/v1/otp/requests` 协议不变，`account` 也支持唯一匹配的手机号或用户名。未知账号返回 403，别名有歧义返回 409。
+
+后台 `/admin` 显示所有账号的在线状态、Session 类型与 DC；鉴权后的 `/api/admin/verify` 和 `/api/admin/stats` 增加 `accounts`、`account_count`、`ready_count`。`/readyz` 仅在全部账号在线时成功；单个账号掉线不影响其他在线账号的请求轮询。
+
+Docker Compose 已传递 `TELEGRAM_ACCOUNTS_JSON` 和 `TELEGRAM_SESSION_STRING`。文件 Session 必须使用容器内 `/data/` 下的独立路径，并先放入持久化 volume。systemd 使用 `/var/lib/moyu-tg-relay/` 下的独立路径，JSON 写入 `/etc/moyu-tg-relay.env`。已有 JSON 的部署向导会跳过单账号 bootstrap。使用 vps-deploy 的 Secret-managed workload 时，在 Secret store 添加完整 JSON，再把 `TELEGRAM_ACCOUNTS_JSON` 加入该 workload 的 `envRefs`；不要把真实 JSON 写进 fleet 配置或仓库。
+
+---
+
 ## 📋 准备工作：申请 Telegram App ID 与 Token
 
 在部署 `moyu-tg-relay` 之前，需要先准备好 Telegram 开发者凭据（`App api_id` 与 `App api_hash`）。

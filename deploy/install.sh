@@ -57,7 +57,13 @@ env_get() {
   [[ -f "$file" ]] || return 0
   awk -v key="$key" '
     index($0, key "=") == 1 {
-      print substr($0, length(key) + 2)
+      value = substr($0, length(key) + 2)
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if (length(value) >= 2 && first == last && (first == "\"" || first == sprintf("%c", 39))) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      print value
       exit
     }
   ' "$file"
@@ -121,6 +127,7 @@ configure_common_env() {
     log "generated a 256-bit Relay Bearer token"
   fi
 
+  if [[ -z "$(env_get "$env_file" TELEGRAM_ACCOUNTS_JSON)" ]]; then
   value="$(env_get "$env_file" TELEGRAM_API_ID)"
   if [[ -z "$value" ]] || is_placeholder TELEGRAM_API_ID "$value"; then
     while true; do
@@ -144,6 +151,8 @@ configure_common_env() {
     env_set "$env_file" TELEGRAM_API_HASH "$value"
   elif [[ ! "$value" =~ ^[0-9A-Fa-f]{32}$ ]]; then
     die "invalid TELEGRAM_API_HASH in ${env_file}"
+  fi
+
   fi
 
   value="$(env_get "$env_file" HAX_TELEGRAM_BOT)"
@@ -255,7 +264,9 @@ run_docker() {
     session_exists=1
   fi
 
-  if [[ -z "$account_id" || "$session_exists" -ne 1 ]]; then
+  if [[ -n "$(env_get "$env_file" TELEGRAM_ACCOUNTS_JSON)" || -n "$(env_get "$env_file" TELEGRAM_SESSION_STRING)" ]]; then
+    log "using configured Telegram sessions; skipping single-account bootstrap"
+  elif [[ -z "$account_id" || "$session_exists" -ne 1 ]]; then
     local bootstrap_log=""
     bootstrap_log="$(mktemp)"
     log "starting interactive Telegram session bootstrap"
@@ -360,7 +371,9 @@ run_systemd() {
   if is_placeholder TELEGRAM_ACCOUNT_ID "$account_id"; then
     account_id=""
   fi
-  if [[ -z "$account_id" || ! -f "${STATE_DIR}/telegram.session" ]]; then
+  if [[ -n "$(env_get "$SYSTEMD_ENV" TELEGRAM_ACCOUNTS_JSON)" || -n "$(env_get "$SYSTEMD_ENV" TELEGRAM_SESSION_STRING)" ]]; then
+    log "using configured Telegram sessions; skipping single-account bootstrap"
+  elif [[ -z "$account_id" || ! -f "${STATE_DIR}/telegram.session" ]]; then
     local bootstrap_log=""
     bootstrap_log="$(mktemp)"
     log "starting interactive Telegram session bootstrap as ${SERVICE_NAME}"

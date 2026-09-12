@@ -101,3 +101,7 @@ sudo /opt/moyu-tg-relay/.venv/bin/python /opt/moyu-tg-relay/smoke_check.py \
 ```
 
 完整 smoke check 同时验证 liveness、Telegram readiness、错误 Bearer Token 被拒绝，以及正确 Token 能通过鉴权进入 handler。
+
+## 多账号
+
+配置 `TELEGRAM_ACCOUNTS_JSON` 后，安装向导保留账号列表并跳过单账号授权。账号添加、renew 对应关系与 Session 路径要求见根目录 README 的“多账号与 moyu-renew”。更改配置后重启服务；`/readyz` 检查全部账号。

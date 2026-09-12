@@ -46,18 +46,23 @@ def print_banner() -> None:
 def load_env_map() -> dict[str, str]:
     if not ENV_FILE.is_file():
         return {}
-    content = ENV_FILE.read_text(encoding="utf-8")
-    env_map = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" in line:
-            k, v = line.split("=", 1)
-            env_map[k.strip()] = v.strip().strip("'").strip('"')
-    return env_map
+    try:
+        from moyu_tg_relay.bootstrap_session import load_env_file
+
+        return load_env_file(str(ENV_FILE))
+    except Exception:
+        content = ENV_FILE.read_text(encoding="utf-8")
+        env_map = {}
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                env_map[k.strip()] = v.strip().strip("'").strip('"')
+        return env_map
 
 
 def find_session_files(env_map: dict[str, str]) -> list[Path]:
@@ -108,11 +113,14 @@ def handle_env_check() -> None:
         ("TELEGRAM_ACCOUNT_ID", "Telegram 账号 ID"),
     ]
 
+    if env_map.get("TELEGRAM_ACCOUNTS_JSON", "").strip():
+        core_keys = [("OTP_RELAY_BEARER_TOKEN", "Bearer 鉴权 Token"), ("TELEGRAM_ACCOUNTS_JSON", "多账号 Session 配置 (保密)")]
+
     print(f"\n  {ConsoleStyle.BOLD}【核心服务凭据】{ConsoleStyle.RESET}")
     for key, desc in core_keys:
         val = env_map.get(key)
         if val:
-            masked = (val[:3] + "***" + val[-3:]) if len(val) > 8 else "***"
+            masked = "***" if key == "TELEGRAM_ACCOUNTS_JSON" else ((val[:3] + "***" + val[-3:]) if len(val) > 8 else "***")
             status = f"{ConsoleStyle.GREEN}已配置{ConsoleStyle.RESET}"
             print(f"  ✅ {ConsoleStyle.BOLD}{key:<26}{ConsoleStyle.RESET} [{status}] {desc} ({masked})")
         else:
@@ -239,7 +247,7 @@ def handle_deployment_guide() -> int:
     return 0
 
 
-def handle_bootstrap_session() -> int:
+def handle_bootstrap_session(*, add_account: bool = False) -> int:
     print(f"\n{ConsoleStyle.BOLD}🔑 正在启动 Telegram 会话与凭据自动化向导 (Bootstrap Session)...{ConsoleStyle.RESET}\n")
     py_exe = get_python_exe()
     cmd = [
@@ -251,6 +259,8 @@ def handle_bootstrap_session() -> int:
         str(ENV_FILE),
     ]
     env = os.environ.copy()
+    if add_account:
+        cmd.append("--add-account")
     src_dir = str(ROOT / "src")
     if "PYTHONPATH" in env:
         env["PYTHONPATH"] = f"{src_dir}:{env['PYTHONPATH']}"
@@ -270,10 +280,11 @@ def interactive_loop() -> None:
         print(f"  {ConsoleStyle.BOLD}[4]{ConsoleStyle.RESET} 🧪 运行测试套件 (Run Pytest Tests)")
         print(f"  {ConsoleStyle.BOLD}[5]{ConsoleStyle.RESET} 📋 检查本地 .env 与配置 (Check Environment)")
         print(f"  {ConsoleStyle.BOLD}[6]{ConsoleStyle.RESET} 🐳 生产部署与引导 (Run install.sh)")
+        print(f"  {ConsoleStyle.BOLD}[7]{ConsoleStyle.RESET} ➕ 添加 Telegram 账号 (保留已有账号)")
         print(f"  {ConsoleStyle.BOLD}[0]{ConsoleStyle.RESET} 🚪 退出控制台")
         print(f"\n{ConsoleStyle.CYAN}{'=' * 58}{ConsoleStyle.RESET}")
 
-        choice = input(f"{ConsoleStyle.BOLD}请选择操作 [0-6]: {ConsoleStyle.RESET}").strip()
+        choice = input(f"{ConsoleStyle.BOLD}请选择操作 [0-7]: {ConsoleStyle.RESET}").strip()
         if choice in ("0", "q", "exit"):
             print(f"\n{ConsoleStyle.GREEN}👋 再见！{ConsoleStyle.RESET}\n")
             break
@@ -289,6 +300,8 @@ def interactive_loop() -> None:
             handle_env_check()
         elif choice == "6":
             handle_deployment_guide()
+        elif choice == "7":
+            handle_bootstrap_session(add_account=True)
         else:
             print(f"{ConsoleStyle.RED}❌ 无效选项，请重新选择{ConsoleStyle.RESET}")
 
@@ -302,7 +315,8 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", help="子命令 (留空进入交互模式)")
 
     # bootstrap
-    subparsers.add_parser("bootstrap", help="初始化 Telegram 会话与 Token")
+    bootstrap_p = subparsers.add_parser("bootstrap", help="初始化 Telegram 会话与 Token")
+    bootstrap_p.add_argument("--add-account", action="store_true", help="添加账号并保留已有 Session")
 
     # run
     run_p = subparsers.add_parser("run", help="启动本地 Relay 服务")
@@ -331,7 +345,7 @@ def main() -> int:
         return 0
 
     if args.command == "bootstrap":
-        return handle_bootstrap_session()
+        return handle_bootstrap_session(add_account=True) if args.add_account else handle_bootstrap_session()
     elif args.command == "run":
         return handle_run_service(host=args.host, port=args.port, reload=not args.no_reload)
     elif args.command == "smoke":

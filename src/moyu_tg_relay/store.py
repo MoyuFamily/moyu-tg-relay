@@ -180,13 +180,21 @@ class PendingOtpStore:
     def has_active_request(self, account: str) -> bool:
         return self.active_request(account) is not None
 
-    def mark_auto_attempted(self, *, account: str, detail: str = "") -> str:
+    def mark_auto_attempted(
+        self,
+        *,
+        account: str,
+        detail: str = "",
+        request_id: Optional[str] = None,
+    ) -> str:
         with self._lock:
             self._expire_locked()
             candidates = self._active_for_account_locked(account)
             if len(candidates) != 1:
                 return ""
             item = candidates[0]
+            if request_id is not None and item.request_id != str(request_id):
+                return ""
             if item.status == "ready":
                 return item.request_id
             item.status = "auto_attempted"
@@ -194,13 +202,21 @@ class PendingOtpStore:
             self._save_locked()
             return item.request_id
 
-    def mark_human_required(self, *, account: str, detail: str = "") -> str:
+    def mark_human_required(
+        self,
+        *,
+        account: str,
+        detail: str = "",
+        request_id: Optional[str] = None,
+    ) -> str:
         with self._lock:
             self._expire_locked()
             candidates = self._active_for_account_locked(account)
             if len(candidates) != 1:
                 return ""
             item = candidates[0]
+            if request_id is not None and item.request_id != str(request_id):
+                return ""
             if item.status == "ready":
                 return item.request_id
             item.status = "human_required"
@@ -208,7 +224,13 @@ class PendingOtpStore:
             self._save_locked()
             return item.request_id
 
-    def attach_code(self, *, account: str, code: str) -> str:
+    def attach_code(
+        self,
+        *,
+        account: str,
+        code: str,
+        request_id: Optional[str] = None,
+    ) -> str:
         normalized_account = str(account or "").strip()
         normalized_code = str(code or "").strip()
         if not normalized_account or not normalized_code or len(normalized_code) > 128:
@@ -219,6 +241,8 @@ class PendingOtpStore:
             if len(candidates) != 1:
                 return ""
             item = candidates[0]
+            if request_id is not None and item.request_id != str(request_id):
+                return ""
             item.code = normalized_code
             item.detail = ""
             item.status = "ready"

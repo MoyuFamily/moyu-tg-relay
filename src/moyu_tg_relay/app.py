@@ -7,6 +7,7 @@ authentication, and applying provider decisions.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 import secrets
@@ -22,6 +23,17 @@ from telethon.sessions import SQLiteSession, StringSession
 from telethon.sessions.abstract import Session
 
 from .admin_dashboard import render_admin_html
+from .accounts import (
+    AccountConfig,
+    AccountIdentity,
+    AccountRuntime,
+    identity_from_config,
+    identity_from_me,
+    load_account_configs,
+    make_runtime,
+    normalize_phone,
+    normalize_username,
+)
 from .log_store import RelayLogStore
 from .providers import IncomingMessage, TelegramProvider, build_provider_registry
 from .store import PendingOtpStore
@@ -79,6 +91,7 @@ TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
 TELEGRAM_SESSION_STRING = os.environ.get("TELEGRAM_SESSION_STRING", "").strip()
 TELEGRAM_SESSION_PATH = _resolve_session_path()
 TELEGRAM_ACCOUNT_ID = os.environ.get("TELEGRAM_ACCOUNT_ID", "").strip()
+TELEGRAM_ACCOUNTS_JSON = os.environ.get("TELEGRAM_ACCOUNTS_JSON", "")
 OTP_STORE_FILE = os.environ.get(
     "OTP_STORE_FILE",
     str(STATE_DIR / "pending_otp_store.json"),
@@ -94,6 +107,12 @@ providers: dict[str, TelegramProvider] = build_provider_registry()
 telegram: Optional[TelegramClient] = None
 session_account_phone: str = ""
 session_account_username: str = ""
+# ``account_runtimes`` is the multi-account registry.  ``accounts`` and
+# ``runtimes`` are aliases kept for integrations/tests that used either name.
+account_runtimes: dict[str, AccountRuntime] = {}
+accounts = account_runtimes
+runtimes = account_runtimes
+_legacy_account_lock = asyncio.Lock()
 
 
 class CreateRequest(BaseModel):
@@ -125,32 +144,55 @@ def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
 
 
+def _configured_account_configs() -> tuple[AccountConfig, ...]:
+    """Read current settings, honoring an explicit multi-account JSON value."""
+    env = dict(os.environ)
+    # Globals remain patchable for the legacy unit tests and old integrations.
+    raw_json = env.get("TELEGRAM_ACCOUNTS_JSON")
+    if raw_json is None:
+        raw_json = TELEGRAM_ACCOUNTS_JSON
+    env["TELEGRAM_ACCOUNTS_JSON"] = raw_json
+    for key, value in {
+        "TELEGRAM_API_ID": str(TELEGRAM_API_ID),
+        "TELEGRAM_API_HASH": TELEGRAM_API_HASH,
+        "TELEGRAM_ACCOUNT_ID": TELEGRAM_ACCOUNT_ID,
+        "TELEGRAM_SESSION_STRING": TELEGRAM_SESSION_STRING,
+        "TELEGRAM_SESSION_PATH": TELEGRAM_SESSION_PATH,
+    }.items():
+        if key not in os.environ:
+            env[key] = value
+    return load_account_configs(env, legacy_session_path=TELEGRAM_SESSION_PATH)
+
+
 def _validate_runtime() -> None:
     missing = []
     if not RELAY_TOKEN:
         missing.append("OTP_RELAY_BEARER_TOKEN")
-    if not TELEGRAM_API_ID:
-        missing.append("TELEGRAM_API_ID")
-    if not TELEGRAM_API_HASH:
-        missing.append("TELEGRAM_API_HASH")
-    if not TELEGRAM_ACCOUNT_ID:
-        missing.append("TELEGRAM_ACCOUNT_ID")
-    if not TELEGRAM_SESSION_STRING and not TELEGRAM_SESSION_PATH:
-        missing.append("TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_PATH")
+    try:
+        configs = _configured_account_configs()
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
     if not providers:
         missing.append("at least one Telegram provider")
+    for config in configs:
+        if not config.api_id:
+            missing.append(f"TELEGRAM_API_ID for account {config.account_id}")
+        if not config.api_hash:
+            missing.append(f"TELEGRAM_API_HASH for account {config.account_id}")
     if missing:
         raise RuntimeError("missing relay configuration: " + ", ".join(missing))
 
 
-def _telegram_session():
-    """Return the configured Telethon session backend."""
-    if TELEGRAM_SESSION_STRING:
+def _telegram_session(config: Optional[AccountConfig] = None):
+    """Return a configured Telethon session backend (StringSession first)."""
+    session_string = config.session_string if config else TELEGRAM_SESSION_STRING
+    session_path = config.session_path if config else TELEGRAM_SESSION_PATH
+    if session_string:
         try:
-            return StringSession(TELEGRAM_SESSION_STRING)
+            return StringSession(session_string)
         except Exception as error:
             raise RuntimeError("TELEGRAM_SESSION_STRING is invalid") from error
-    return TELEGRAM_SESSION_PATH
+    return session_path
 
 
 def _probe_outbound_route(family: int, address: str, port: int, timeout: float = 1.5) -> bool:
@@ -201,9 +243,13 @@ def _detect_use_ipv6(session: Optional[Session] = None) -> bool:
     return False
 
 
-def _prepare_telegram_session(use_ipv6: bool = False) -> Session:
+def _prepare_telegram_session(
+    use_ipv6: bool = False,
+    config: Optional[AccountConfig] = None,
+    prepared_session: Optional[Session] = None,
+) -> Session:
     """Return an initialized Telethon Session instance with DC routing adapted."""
-    raw = _telegram_session()
+    raw = prepared_session if prepared_session is not None else _telegram_session(config)
     if isinstance(raw, (str, Path)):
         session = SQLiteSession(str(raw))
     elif isinstance(raw, Session):
@@ -228,13 +274,39 @@ def _prepare_telegram_session(use_ipv6: bool = False) -> Session:
     return session
 
 
-def _telegram_ready() -> bool:
-    if telegram is None:
+def _runtime_map() -> dict[str, AccountRuntime]:
+    for candidate in (account_runtimes, accounts, runtimes):
+        if candidate:
+            return candidate
+    return account_runtimes
+
+
+def _client_ready(client: Any) -> bool:
+    if client is None:
         return False
     try:
-        return bool(telegram.is_connected())
+        return bool(client.is_connected())
     except Exception:
         return False
+
+
+def _runtime_for(account_id: str) -> Optional[AccountRuntime]:
+    return _runtime_map().get(str(account_id or "").strip())
+
+
+def _telegram_ready(account_id: Optional[str] = None) -> bool:
+    if account_id:
+        runtime = _runtime_for(account_id)
+        if runtime:
+            return _client_ready(runtime.client)
+        # With no multi-account registry the historical single client is the
+        # only possible route; tests and old callers may create its store key
+        # before setting TELEGRAM_ACCOUNT_ID.
+        return _client_ready(telegram) if not _runtime_map() else False
+    registry = _runtime_map()
+    if registry:
+        return all(_client_ready(runtime.client) for runtime in registry.values())
+    return _client_ready(telegram)
 
 
 def _iter_message_buttons(msg_or_event: Any) -> tuple[Any, ...]:
@@ -246,10 +318,23 @@ def _provider_for(name: str) -> Optional[TelegramProvider]:
     return providers.get(str(name or "").strip().lower())
 
 
-def _mark_human_required(detail: str, *, provider_name: str) -> None:
+def _account_lock(account_id: str) -> asyncio.Lock:
+    runtime = _runtime_for(account_id)
+    return runtime.lock if runtime else _legacy_account_lock
+
+
+def _mark_human_required(
+    detail: str,
+    *,
+    provider_name: str,
+    account_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> str:
+    account_key = str(account_id or TELEGRAM_ACCOUNT_ID).strip()
     request_id = store.mark_human_required(
-        account=TELEGRAM_ACCOUNT_ID,
+        account=account_key,
         detail=detail,
+        request_id=request_id,
     )
     if request_id:
         print(
@@ -261,25 +346,30 @@ def _mark_human_required(detail: str, *, provider_name: str) -> None:
         category="provider",
         message=f"{provider_name} 交互需要人工干预: {detail}",
         provider=provider_name,
-        account=TELEGRAM_ACCOUNT_ID,
+        account=account_key,
         request_id=request_id or "",
         detail=detail,
     )
+    return request_id
 
 
-async def _process_incoming_telegram_message(
+async def _process_incoming_telegram_message_unlocked(
     *,
     sender_username: str,
     sender_id: str,
     text: str,
     buttons: tuple[Any, ...],
     request: PendingOtp,
+    account_id: Optional[str] = None,
 ) -> bool:
+    account_key = str(account_id or request.account or TELEGRAM_ACCOUNT_ID).strip()
     provider = _provider_for(request.provider)
     if provider is None:
         _mark_human_required(
             f"provider is no longer available: {request.provider}",
             provider_name=request.provider,
+            account_id=account_key,
+            request_id=request.request_id,
         )
         return False
 
@@ -297,7 +387,7 @@ async def _process_incoming_telegram_message(
             category="provider",
             message=f"{provider.name} 评估消息并忽略",
             provider=provider.name,
-            account=TELEGRAM_ACCOUNT_ID,
+            account=account_key,
             request_id=request.request_id,
             detail="ignore",
             extra={"sender_username": sender_username, "sender_id": sender_id},
@@ -306,8 +396,9 @@ async def _process_incoming_telegram_message(
 
     if decision.action == "code":
         request_id = store.attach_code(
-            account=TELEGRAM_ACCOUNT_ID,
+            account=account_key,
             code=decision.code,
+            request_id=request.request_id,
         )
         if request_id:
             print(
@@ -319,7 +410,7 @@ async def _process_incoming_telegram_message(
             category="provider",
             message=f"捕获到 {provider.name} 验证码: {decision.code[:2]}***{decision.code[-2:] if len(decision.code) > 3 else ''}",
             provider=provider.name,
-            account=TELEGRAM_ACCOUNT_ID,
+            account=account_key,
             request_id=request_id or request.request_id,
             detail="code attached",
             extra={"code_len": len(decision.code)},
@@ -327,15 +418,29 @@ async def _process_incoming_telegram_message(
         return True
 
     if decision.action == "human_required":
-        _mark_human_required(decision.detail, provider_name=provider.name)
+        _mark_human_required(
+            decision.detail,
+            provider_name=provider.name,
+            account_id=account_key,
+            request_id=request.request_id,
+        )
         return True
 
     if decision.action != "click" or decision.button is None:
         _mark_human_required(
             f"provider returned unsupported action: {decision.action}",
             provider_name=provider.name,
+            account_id=account_key,
+            request_id=request.request_id,
         )
         return True
+
+    # Event delivery and active polling may evaluate the same card.  Only a
+    # pending, current request can click; OTP updates remain valid after a
+    # successful click or manual fallback.
+    current = store.get(request.request_id)
+    if current.account != account_key or current.status != "pending":
+        return False
 
     btn_text = getattr(decision.button, "text", "")
     log_store.record(
@@ -343,7 +448,7 @@ async def _process_incoming_telegram_message(
         category="provider",
         message=f"准备自动点击 {provider.name} 确认按钮: {btn_text}",
         provider=provider.name,
-        account=TELEGRAM_ACCOUNT_ID,
+        account=account_key,
         request_id=request.request_id,
         detail=decision.detail,
         extra={"button_text": btn_text},
@@ -355,12 +460,15 @@ async def _process_incoming_telegram_message(
         _mark_human_required(
             f"自动点击 Telegram 确认失败: {type(error).__name__}",
             provider_name=provider.name,
+            account_id=account_key,
+            request_id=request.request_id,
         )
         return True
 
     request_id = store.mark_auto_attempted(
-        account=TELEGRAM_ACCOUNT_ID,
+        account=account_key,
         detail=decision.detail,
+        request_id=request.request_id,
     )
     if request_id:
         print(
@@ -372,15 +480,51 @@ async def _process_incoming_telegram_message(
         category="provider",
         message=f"已成功自动点击 {provider.name} 确认按钮: {btn_text}",
         provider=provider.name,
-        account=TELEGRAM_ACCOUNT_ID,
+        account=account_key,
         request_id=request_id or request.request_id,
         detail=decision.detail,
     )
     return True
 
 
-async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
-    request = store.active_request(TELEGRAM_ACCOUNT_ID)
+async def _process_incoming_telegram_message(
+    *,
+    sender_username: str,
+    sender_id: str,
+    text: str,
+    buttons: tuple[Any, ...],
+    request: PendingOtp,
+    account_id: Optional[str] = None,
+) -> bool:
+    """Process one message under the account lock and request-id fence."""
+    account_key = str(account_id or request.account or TELEGRAM_ACCOUNT_ID).strip()
+    async with _account_lock(account_key):
+        try:
+            current = store.get(request.request_id)
+        except KeyError:
+            return False
+        if current.account != account_key or current.status not in {
+            "pending", "auto_attempted", "human_required"
+        }:
+            return False
+        return await _process_incoming_telegram_message_unlocked(
+            sender_username=sender_username,
+            sender_id=sender_id,
+            text=text,
+            buttons=buttons,
+            request=request,
+            account_id=account_key,
+        )
+
+
+async def _handle_telegram_message(
+    event: events.NewMessage.Event,
+    account_id: Optional[str] = None,
+) -> None:
+    if isinstance(account_id, AccountRuntime):
+        account_id = account_id.account_id
+    account_key = str(account_id or TELEGRAM_ACCOUNT_ID).strip()
+    request = store.active_request(account_key)
     sender = await event.get_sender()
     sender_username = str(getattr(sender, "username", "") or "").lower()
     sender_id = str(getattr(sender, "id", "") or "")
@@ -393,7 +537,7 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
         level="INFO",
         category="telegram",
         message=f"收到来自 @{sender_username or sender_id} 的 Telegram 消息 (按钮数: {len(buttons)})",
-        account=TELEGRAM_ACCOUNT_ID,
+        account=account_key,
         request_id=request.request_id if request else "",
         provider=request.provider if request else "",
         detail=f"buttons={len(buttons)}",
@@ -415,11 +559,20 @@ async def _handle_telegram_message(event: events.NewMessage.Event) -> None:
         text=text,
         buttons=buttons,
         request=request,
+        account_id=account_key,
     )
 
 
-async def _poll_pending_interaction(request: PendingOtp) -> None:
-    if telegram is None:
+async def _poll_pending_interaction(
+    request: PendingOtp,
+    client: Any = None,
+) -> None:
+    account_key = str(request.account or "").strip()
+    runtime = _runtime_for(account_key)
+    selected_client = runtime.client if runtime else (
+        client if client is not None else (telegram if account_key == TELEGRAM_ACCOUNT_ID else None)
+    )
+    if not _client_ready(selected_client):
         return
     provider = _provider_for(request.provider)
     if provider is None:
@@ -434,9 +587,13 @@ async def _poll_pending_interaction(request: PendingOtp) -> None:
 
     for target in targets:
         try:
-            messages = await telegram.get_messages(target, limit=2)
+            messages = await selected_client.get_messages(target, limit=2)
             for msg in messages:
-                if request.status != "pending":
+                try:
+                    current = store.get(request.request_id)
+                except KeyError:
+                    return
+                if current.account != account_key or current.status not in {"pending", "auto_attempted", "human_required"}:
                     return
                 msg_date = getattr(msg, "date", None)
                 if msg_date:
@@ -454,6 +611,7 @@ async def _poll_pending_interaction(request: PendingOtp) -> None:
                     text=text,
                     buttons=buttons,
                     request=request,
+                    account_id=account_key,
                 )
                 if processed:
                     return
@@ -464,7 +622,7 @@ async def _poll_pending_interaction(request: PendingOtp) -> None:
                 category="telegram",
                 message=f"主动轮询 {target} 异常: {error}",
                 provider=request.provider,
-                account=TELEGRAM_ACCOUNT_ID,
+                account=account_key,
                 request_id=request.request_id,
                 detail=str(error),
             )
@@ -472,77 +630,107 @@ async def _poll_pending_interaction(request: PendingOtp) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global telegram
+    global telegram, account_runtimes, accounts, runtimes, session_account_phone, session_account_username
     _validate_runtime()
-    raw_session = _telegram_session()
-    initial_session = SQLiteSession(str(raw_session)) if isinstance(raw_session, (str, Path)) else raw_session
-    use_ipv6 = _detect_use_ipv6(session=initial_session if isinstance(initial_session, Session) else None)
-    session = _prepare_telegram_session(use_ipv6=use_ipv6)
-    telegram = TelegramClient(
-        session,
-        TELEGRAM_API_ID,
-        TELEGRAM_API_HASH,
-        use_ipv6=use_ipv6,
-    )
-    if use_ipv6 and telegram.session.dc_id in TELEGRAM_DC_IPV6_MAP:
-        target_ip = TELEGRAM_DC_IPV6_MAP[telegram.session.dc_id]
-        if telegram.session.server_address != target_ip:
-            telegram.session.set_dc(
-                telegram.session.dc_id, target_ip, telegram.session.port or 443
-            )
-    await telegram.connect()
-    if not await telegram.is_user_authorized():
-        await telegram.disconnect()
-        telegram = None
-        raise RuntimeError(
-            "Telegram session is not authorised; run bootstrap_session.py first"
-        )
-    me = await telegram.get_me()
-    if str(getattr(me, "id", "")) != TELEGRAM_ACCOUNT_ID:
-        await telegram.disconnect()
-        telegram = None
-        raise RuntimeError(
-            "TELEGRAM_ACCOUNT_ID does not match the authorised Telegram session"
-        )
-    global session_account_phone, session_account_username
-    session_account_phone = str(getattr(me, "phone", "") or "").strip()
-    session_account_username = str(getattr(me, "username", "") or "").strip().lower()
-    telegram.add_event_handler(_handle_telegram_message, events.NewMessage(incoming=True))
-    session_mode = "string" if TELEGRAM_SESSION_STRING else "file"
+    configs = _configured_account_configs()
+    telegram = None
+    session_account_phone = ""
+    session_account_username = ""
+    registry: dict[str, AccountRuntime] = {}
+    account_runtimes = registry
+    accounts = registry
+    runtimes = registry
     provider_names = ",".join(sorted(providers))
-    ip_mode = f"ipv6:dc{telegram.session.dc_id}" if use_ipv6 else f"ipv4:dc{telegram.session.dc_id}"
-    print(
-        f"[interaction-relay] Telegram session ready ({session_mode}, {ip_mode}); "
-        f"providers={provider_names}"
-    )
-    # Prune expired logs on startup
-    pruned_count = log_store.prune()
-    log_store.record(
-        level="INFO",
-        category="system",
-        message=f"Telegram 会话就绪 ({session_mode}, {ip_mode}); providers={provider_names}",
-        account=TELEGRAM_ACCOUNT_ID,
-        detail=f"startup_pruned={pruned_count}",
-        extra={
-            "session_mode": session_mode,
-            "ip_mode": ip_mode,
-            "providers": sorted(providers.keys()),
-            "phone": session_account_phone,
-            "username": session_account_username,
-            "retention_days": LOG_RETENTION_DAYS,
-        },
-    )
+    created: list[AccountRuntime] = []
     try:
-        yield
-    finally:
+        for config in configs:
+            runtime = make_runtime(config)
+            registry[config.account_id] = runtime
+            created.append(runtime)
+            raw_session = _telegram_session(config)
+            initial_session = SQLiteSession(str(raw_session)) if isinstance(raw_session, (str, Path)) else raw_session
+            use_ipv6 = _detect_use_ipv6(session=initial_session if isinstance(initial_session, Session) else None)
+            try:
+                session = _prepare_telegram_session(use_ipv6=use_ipv6, config=config, prepared_session=initial_session)
+                client = TelegramClient(session, config.api_id, config.api_hash, use_ipv6=use_ipv6)
+            except BaseException:
+                initial_session.close()
+                raise
+            runtime.client = client
+            if telegram is None:
+                telegram = client
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise RuntimeError("Telegram session is not authorised; run bootstrap_session.py first")
+            me = await client.get_me()
+            if str(getattr(me, "id", "")) != config.account_id:
+                raise RuntimeError("authorised Telegram session account ID does not match configuration")
+            runtime.identity = identity_from_me(config, me)
+            runtime.status = "ready"
+            handler = (lambda bound_id: (lambda event: _handle_telegram_message(event, bound_id)))(config.account_id)
+            client.add_event_handler(handler, events.NewMessage(incoming=True))
+            if config.account_id == TELEGRAM_ACCOUNT_ID or len(configs) == 1:
+                session_account_phone = runtime.identity.phone
+                session_account_username = runtime.identity.username
+            ip_mode = f"ipv6:dc{client.session.dc_id}" if use_ipv6 else f"ipv4:dc{client.session.dc_id}"
+            print(f"[interaction-relay] Telegram session ready ({config.session_mode}, {ip_mode}); providers={provider_names}")
+    except BaseException:
+        for runtime in created:
+            try:
+                if runtime.client is not None:
+                    await runtime.client.disconnect()
+            except Exception:
+                pass
+            runtime.status = "not_ready"
+        account_runtimes.clear()
+        telegram = None
+        raise
+    try:
+        # Prune expired logs on startup.
+        pruned_count = log_store.prune()
         log_store.record(
             level="INFO",
             category="system",
-            message="Telegram Relay 服务正在关闭...",
-            account=TELEGRAM_ACCOUNT_ID,
+            message=f"Telegram 会话就绪 ({len(configs)} accounts); providers={provider_names}",
+            account=configs[0].account_id if configs else TELEGRAM_ACCOUNT_ID,
+            detail=f"startup_pruned={pruned_count}",
+            extra={
+                "account_count": len(configs),
+                "providers": sorted(providers.keys()),
+                "retention_days": LOG_RETENTION_DAYS,
+            },
         )
-        await telegram.disconnect()
+    except BaseException:
+        for runtime in created:
+            try:
+                if runtime.client is not None:
+                    await runtime.client.disconnect()
+            except Exception:
+                pass
+            runtime.status = "not_ready"
+        account_runtimes.clear()
         telegram = None
+        raise
+    try:
+        yield
+    finally:
+        try:
+            log_store.record(
+                level="INFO",
+                category="system",
+                message="Telegram Relay 服务正在关闭...",
+                account=configs[0].account_id if configs else TELEGRAM_ACCOUNT_ID,
+            )
+        finally:
+            for runtime in list(_runtime_map().values()):
+                try:
+                    if runtime.client is not None:
+                        await runtime.client.disconnect()
+                except Exception:
+                    pass
+                runtime.status = "not_ready"
+            account_runtimes.clear()
+            telegram = None
 
 
 app = FastAPI(
@@ -573,48 +761,118 @@ def readyz() -> dict[str, str]:
 
 
 def _is_matching_account(supplied: str) -> bool:
+    return _resolve_account_id(supplied) is not None
+
+
+def _candidate_identities() -> list[AccountIdentity]:
+    registry = _runtime_map()
+    if registry:
+        result: list[AccountIdentity] = []
+        for runtime in registry.values():
+            result.append(runtime.identity or identity_from_config(runtime.config))
+        return result
+    try:
+        configs = _configured_account_configs()
+    except ValueError:
+        if TELEGRAM_ACCOUNT_ID:
+            return [
+                AccountIdentity(
+                    TELEGRAM_ACCOUNT_ID,
+                    session_account_phone or os.environ.get("TELEGRAM_PHONE", ""),
+                    session_account_username or os.environ.get("TELEGRAM_USERNAME", ""),
+                )
+            ]
+        return []
+    result = []
+    for config in configs:
+        if config.account_id == TELEGRAM_ACCOUNT_ID and session_account_phone:
+            result.append(
+                AccountIdentity(
+                    config.account_id,
+                    session_account_phone,
+                    session_account_username,
+                    config.phone,
+                    config.username,
+                )
+            )
+        else:
+            result.append(identity_from_config(config))
+    return result
+
+
+def _resolve_account_id(supplied: str) -> Optional[str]:
+    """Resolve one request account, returning ``None`` for unknown/ambiguous."""
     target = str(supplied or "").strip()
     if not target:
-        return False
-    if TELEGRAM_ACCOUNT_ID and target == TELEGRAM_ACCOUNT_ID:
-        return True
+        return None
+    identities = _candidate_identities()
+    # Exact ID always wins over aliases.
+    target_id = str(int(target)) if target.isdigit() else target
+    exact = [item.account_id for item in identities if target_id == item.account_id]
+    if exact:
+        return exact[0] if len(set(exact)) == 1 else None
 
-    # 1. Phone number comparison (digits-only, supporting international/local formatting)
-    phone_candidates: list[str] = []
-    if session_account_phone:
-        phone_candidates.append(session_account_phone)
-    env_phone = os.environ.get("TELEGRAM_PHONE", "").strip()
-    if env_phone:
-        phone_candidates.append(env_phone)
+    phone_input = normalize_phone(target)
+    if phone_input:
+        matches: list[str] = []
+        for item in identities:
+            for phone in item.phone_aliases:
+                candidate = normalize_phone(phone)
+                if not candidate:
+                    continue
+                if phone_input == candidate or (
+                    len(phone_input) >= 8
+                    and len(candidate) >= 8
+                    and (phone_input.endswith(candidate) or candidate.endswith(phone_input))
+                ):
+                    matches.append(item.account_id)
+                    break
+        unique = set(matches)
+        if len(unique) == 1:
+            return next(iter(unique))
+        return None
 
-    supplied_digits = "".join(c for c in target if c.isdigit())
-    if supplied_digits:
-        for p in phone_candidates:
-            p_digits = "".join(c for c in str(p or "") if c.isdigit())
-            if not p_digits:
-                continue
-            if supplied_digits == p_digits:
-                return True
-            if len(supplied_digits) >= 8 and len(p_digits) >= 8:
-                if supplied_digits.endswith(p_digits) or p_digits.endswith(supplied_digits):
-                    return True
+    username = normalize_username(target)
+    if username:
+        matches = [
+            item.account_id
+            for item in identities
+            if username in item.username_aliases
+        ]
+        unique = set(matches)
+        if len(unique) == 1:
+            return next(iter(unique))
+    return None
 
-    # 2. Username comparison (case-insensitive, optional @)
-    user_candidates: list[str] = []
-    if session_account_username:
-        user_candidates.append(session_account_username)
-    env_user = os.environ.get("TELEGRAM_USERNAME", "").strip().lower()
-    if env_user:
-        user_candidates.append(env_user)
 
-    clean_supplied_user = target.lstrip("@").lower()
-    if clean_supplied_user:
-        for u in user_candidates:
-            clean_u = str(u or "").strip().lstrip("@").lower()
-            if clean_u and clean_supplied_user == clean_u:
-                return True
-
-    return False
+def _account_match_candidates(supplied: str) -> list[str]:
+    target = str(supplied or "").strip()
+    identities = _candidate_identities()
+    target_id = str(int(target)) if target.isdigit() else target
+    exact = [item.account_id for item in identities if target_id == item.account_id]
+    if exact:
+        return sorted(set(exact))
+    phone_input = normalize_phone(target)
+    if phone_input:
+        matches = []
+        for item in identities:
+            if any(
+                phone_input == normalize_phone(phone)
+                or (
+                    len(phone_input) >= 8
+                    and len(normalize_phone(phone)) >= 8
+                    and (
+                        phone_input.endswith(normalize_phone(phone))
+                        or normalize_phone(phone).endswith(phone_input)
+                    )
+                )
+                for phone in item.phone_aliases
+                if normalize_phone(phone)
+            ):
+                matches.append(item.account_id)
+        return sorted(set(matches))
+    username = normalize_username(target)
+    return sorted({item.account_id for item in identities if username in item.username_aliases})
 
 
 @app.post(
@@ -626,9 +884,15 @@ def create_request(payload: CreateRequest) -> CreateResponse:
     provider_name = payload.provider.strip().lower()
     if _provider_for(provider_name) is None:
         raise HTTPException(status_code=400, detail="unsupported provider")
-    if not _is_matching_account(payload.account):
+    candidates = _account_match_candidates(payload.account)
+    account_key = _resolve_account_id(payload.account)
+    # Preserve the old helper as an extension point for legacy callers/tests.
+    if account_key is None and _is_matching_account(payload.account):
+        account_key = TELEGRAM_ACCOUNT_ID or payload.account.strip()
+    if len(candidates) > 1:
+        raise HTTPException(status_code=409, detail="account is ambiguous")
+    if account_key is None:
         raise HTTPException(status_code=403, detail="account does not match relay session")
-    account_key = TELEGRAM_ACCOUNT_ID or payload.account.strip()
     request = store.create(
         account_key,
         payload.ttl_seconds,
@@ -662,7 +926,7 @@ async def request_status(request_id: str) -> StatusResponse:
     except KeyError as error:
         raise HTTPException(status_code=404, detail="request not found") from error
 
-    if request.status == "pending" and _telegram_ready():
+    if request.status in {"pending", "auto_attempted", "human_required"} and _telegram_ready(request.account):
         await _poll_pending_interaction(request)
 
     return StatusResponse(
@@ -728,33 +992,80 @@ def admin_dashboard_ui() -> HTMLResponse:
 @app.get("/api/admin/verify", dependencies=[Depends(require_auth)])
 def admin_verify() -> dict[str, Any]:
     """Verify administrator Bearer authentication token."""
-    return {
+    entries = _admin_account_entries()
+    result = {
         "status": "ready" if _telegram_ready() else "not_ready",
-        "account_id": TELEGRAM_ACCOUNT_ID,
-        "phone": session_account_phone,
-        "username": session_account_username,
+        "account_id": entries[0]["account_id"] if entries else TELEGRAM_ACCOUNT_ID,
+        "phone": entries[0]["phone"] if entries else session_account_phone,
+        "username": entries[0]["username"] if entries else session_account_username,
     }
+    result.update({"accounts": entries, "account_count": len(entries),
+                   "ready_count": sum(item["status"] == "ready" for item in entries)})
+    return result
+
+
+def _admin_account_entries() -> list[dict[str, Any]]:
+    registry = _runtime_map()
+    if registry:
+        runtimes_to_report = list(registry.values())
+    else:
+        try:
+            configs = _configured_account_configs()
+        except ValueError:
+            configs = ()
+        runtimes_to_report = [
+            AccountRuntime(config=config, identity=identity_from_config(config))
+            for config in configs
+        ]
+        if len(runtimes_to_report) == 1 and TELEGRAM_ACCOUNT_ID:
+            runtimes_to_report[0].identity = AccountIdentity(
+                TELEGRAM_ACCOUNT_ID, session_account_phone,
+                session_account_username,
+                runtimes_to_report[0].config.phone,
+                runtimes_to_report[0].config.username,
+            )
+            runtimes_to_report[0].client = telegram
+    entries: list[dict[str, Any]] = []
+    for runtime in runtimes_to_report:
+        identity = runtime.identity or identity_from_config(runtime.config)
+        client = runtime.client
+        dc_info = ""
+        session = getattr(client, "session", None)
+        if session is not None:
+            dc_info = f"DC {getattr(session, 'dc_id', '-') }"
+            addr = getattr(session, "server_address", "")
+            if addr:
+                dc_info += f" ({addr})"
+        entries.append({
+            "account_id": identity.account_id,
+            "phone": identity.phone,
+            "username": identity.username,
+            "status": "ready" if _client_ready(client) else "not_ready",
+            "session_mode": runtime.config.session_mode,
+            "dc_info": dc_info,
+        })
+    return entries
 
 
 @app.get("/api/admin/stats", dependencies=[Depends(require_auth)])
 def admin_stats() -> dict[str, Any]:
     """Aggregate overview metrics and runtime telemetry."""
     stats = log_store.get_stats()
-    session_mode = "string" if TELEGRAM_SESSION_STRING else "file"
-    dc_info = ""
-    if telegram and getattr(telegram, "session", None):
-        dc_info = f"DC {getattr(telegram.session, 'dc_id', '-')}"
-        addr = getattr(telegram.session, "server_address", "")
-        if addr:
-            dc_info += f" ({addr})"
+    entries = _admin_account_entries()
+    first = entries[0] if entries else {}
+    session_mode = first.get("session_mode", "string" if TELEGRAM_SESSION_STRING else "file")
+    dc_info = first.get("dc_info", "")
     stats["session_mode"] = session_mode
     stats["dc_info"] = dc_info
     stats["telegram"] = {
         "status": "ready" if _telegram_ready() else "not_ready",
-        "account_id": TELEGRAM_ACCOUNT_ID,
-        "phone": session_account_phone,
-        "username": session_account_username,
+        "account_id": first.get("account_id", TELEGRAM_ACCOUNT_ID),
+        "phone": first.get("phone", session_account_phone),
+        "username": first.get("username", session_account_username),
     }
+    stats["accounts"] = entries
+    stats["account_count"] = len(entries)
+    stats["ready_count"] = sum(item["status"] == "ready" for item in entries)
     return stats
 
 
@@ -802,4 +1113,12 @@ def admin_prune_logs(payload: Optional[PrunePayload] = None) -> dict[str, int]:
     return {"deleted": deleted}
 
 
-__all__ = ["app", "log_store", "providers", "store"]
+__all__ = [
+    "app",
+    "account_runtimes",
+    "accounts",
+    "log_store",
+    "providers",
+    "runtimes",
+    "store",
+]

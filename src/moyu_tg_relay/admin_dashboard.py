@@ -820,6 +820,8 @@ def render_admin_html() -> str:
       </div>
     </div>
 
+    <div class="toolbar-panel" id="telegram-accounts" aria-label="Telegram 账号连接状态" style="display:none; flex-wrap:wrap;"></div>
+
     <!-- Filter & Toolbar Panel -->
     <div class="toolbar-panel">
       <div class="filter-group">
@@ -1223,7 +1225,28 @@ def render_admin_html() -> str:
           txt.textContent = "未就绪 / 离线";
         }
 
-        if (info && info.account_id) {
+        const entries = (info && info.accounts) || [];
+        const panel = document.getElementById("telegram-accounts");
+        panel.replaceChildren();
+        panel.style.display = entries.length ? "flex" : "none";
+        entries.forEach(account => {
+          const card = document.createElement("div");
+          card.className = "metric-card";
+          card.style.flex = "1 1 240px";
+          const identity = document.createElement("div");
+          identity.className = "mono-cell";
+          identity.textContent = `UID: ${account.account_id}${account.username ? " · @" + account.username : ""}`;
+          const details = document.createElement("div");
+          details.className = "metric-desc";
+          details.textContent = `${account.status === "ready" ? "已连接" : "离线"} · ${account.session_mode} · ${account.dc_info || "DC 未知"}`;
+          card.append(identity, details);
+          panel.appendChild(card);
+        });
+        if (entries.length > 1) {
+          const ready = entries.filter(account => account.status === "ready").length;
+          accPill.style.display = "inline-flex";
+          accDisplay.textContent = `账号 ${ready}/${entries.length} 在线`;
+        } else if (info && info.account_id) {
           accPill.style.display = "inline-flex";
           accDisplay.textContent = `UID: ${info.account_id}`;
         }
@@ -1253,7 +1276,12 @@ def render_admin_html() -> str:
           document.getElementById("metric-session-mode").textContent = `Session: ${sMode}`;
           document.getElementById("metric-dc-info").textContent = `DC 路由: ${dcIp}`;
 
-          updateTelegramStatus(stats.telegram);
+          const entries = stats.accounts || [];
+          updateTelegramStatus({...stats.telegram, accounts: entries});
+          if (entries.length > 1) {
+            document.getElementById("metric-session-mode").textContent = `${stats.ready_count}/${entries.length} 个账号在线`;
+            document.getElementById("metric-dc-info").textContent = "各账号 Session 与连接独立管理";
+          }
         } catch (err) {
           console.error("fetchStats error:", err);
         }
