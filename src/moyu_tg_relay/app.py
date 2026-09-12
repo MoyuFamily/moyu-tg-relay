@@ -73,6 +73,9 @@ STATE_DIR = _resolve_state_dir()
 def _resolve_session_path() -> str:
     explicit = os.environ.get("TELEGRAM_SESSION_PATH", "").strip()
     if explicit:
+        p = Path(explicit)
+        if not p.is_absolute() and (explicit.startswith("./.state") or explicit.startswith(".state")):
+            return str(STATE_DIR / p.name)
         return explicit
     for candidate in (
         STATE_DIR / "telegram.session",

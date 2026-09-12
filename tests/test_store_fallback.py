@@ -38,5 +38,33 @@ class StoreFallbackTests(unittest.TestCase):
         self.assertEqual(store.get(request.request_id).status, "ready")
 
 
+    def test_state_and_session_path_resolution(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from moyu_tg_relay.app import _resolve_session_path, _resolve_state_dir
+
+        old_state = os.environ.get("STATE_DIR")
+        old_sess = os.environ.get("TELEGRAM_SESSION_PATH")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                custom_dir = str(Path(tmp_dir) / "custom_state")
+                os.environ["STATE_DIR"] = custom_dir
+                resolved_state = _resolve_state_dir()
+                self.assertEqual(resolved_state, Path(custom_dir))
+
+                os.environ["TELEGRAM_SESSION_PATH"] = "./.state/my.session"
+                self.assertTrue(_resolve_session_path().endswith("my.session"))
+            finally:
+                if old_state is not None:
+                    os.environ["STATE_DIR"] = old_state
+                else:
+                    os.environ.pop("STATE_DIR", None)
+                if old_sess is not None:
+                    os.environ["TELEGRAM_SESSION_PATH"] = old_sess
+                else:
+                    os.environ.pop("TELEGRAM_SESSION_PATH", None)
+
+
 if __name__ == "__main__":
     unittest.main()
