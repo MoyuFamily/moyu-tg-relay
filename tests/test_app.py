@@ -146,17 +146,17 @@ class MoyuTgRelayAppTests(unittest.TestCase):
     def test_is_matching_account_accepts_id_phone_and_username(self):
         with (
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "6812345678"),
-            patch.object(relay_app, "session_account_phone", "8619157902891"),
+            patch.object(relay_app, "session_account_phone", "8613800138000"),
             patch.object(relay_app, "session_account_username", "my_bot_user"),
         ):
             # 1. Exact numeric account ID
             self.assertTrue(relay_app._is_matching_account("6812345678"))
 
             # 2. International phone formats
-            self.assertTrue(relay_app._is_matching_account("+8619157902891"))
-            self.assertTrue(relay_app._is_matching_account("8619157902891"))
-            self.assertTrue(relay_app._is_matching_account("+86 191 5790 2891"))
-            self.assertTrue(relay_app._is_matching_account("19157902891"))
+            self.assertTrue(relay_app._is_matching_account("+8613800138000"))
+            self.assertTrue(relay_app._is_matching_account("8613800138000"))
+            self.assertTrue(relay_app._is_matching_account("+86 138 0013 8000"))
+            self.assertTrue(relay_app._is_matching_account("13800138000"))
 
             # 3. Username with or without @
             self.assertTrue(relay_app._is_matching_account("my_bot_user"))
@@ -165,18 +165,18 @@ class MoyuTgRelayAppTests(unittest.TestCase):
 
             # 4. Reject mismatching accounts
             self.assertFalse(relay_app._is_matching_account("9999999999"))
-            self.assertFalse(relay_app._is_matching_account("+8613800138000"))
+            self.assertFalse(relay_app._is_matching_account("+8613900139000"))
             self.assertFalse(relay_app._is_matching_account("other_user"))
             self.assertFalse(relay_app._is_matching_account(""))
 
     def test_create_request_accepts_phone_and_normalizes_to_account_id(self):
         store = relay_app.PendingOtpStore()
-        payload = relay_app.CreateRequest(provider="hax", account="+8619157902891")
+        payload = relay_app.CreateRequest(provider="hax", account="+8613800138000")
 
         with (
             patch.object(relay_app, "store", store),
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "6812345678"),
-            patch.object(relay_app, "session_account_phone", "8619157902891"),
+            patch.object(relay_app, "session_account_phone", "8613800138000"),
         ):
             resp = relay_app.create_request(payload)
 
@@ -188,12 +188,12 @@ class MoyuTgRelayAppTests(unittest.TestCase):
 
     def test_create_request_rejects_unmatched_account_with_403(self):
         store = relay_app.PendingOtpStore()
-        payload = relay_app.CreateRequest(provider="hax", account="+8613800138000")
+        payload = relay_app.CreateRequest(provider="hax", account="+8613900139000")
 
         with (
             patch.object(relay_app, "store", store),
             patch.object(relay_app, "TELEGRAM_ACCOUNT_ID", "6812345678"),
-            patch.object(relay_app, "session_account_phone", "8619157902891"),
+            patch.object(relay_app, "session_account_phone", "8613800138000"),
         ):
             with self.assertRaises(HTTPException) as ctx:
                 relay_app.create_request(payload)
