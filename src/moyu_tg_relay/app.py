@@ -22,7 +22,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import SQLiteSession, StringSession
 from telethon.sessions.abstract import Session
 
-from .admin_dashboard import render_admin_html
+from .admin_dashboard import render_admin_html, TG_RELAY_LOGO_SVG
 from .accounts import (
     AccountConfig,
     AccountIdentity,
@@ -1107,6 +1107,16 @@ def cancel_request(request_id: str) -> Response:
 def admin_dashboard_ui() -> HTMLResponse:
     """Serve the modern web admin console."""
     return HTMLResponse(content=render_admin_html())
+
+
+@app.get("/favicon.ico")
+def favicon_endpoint() -> Response:
+    """Serve the SVG favicon directly for browser requests."""
+    return Response(
+        content=TG_RELAY_LOGO_SVG.encode("utf-8"),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/api/admin/verify", dependencies=[Depends(require_auth)])

@@ -11,16 +11,78 @@ Features:
 
 from __future__ import annotations
 
+import base64
+
+TG_RELAY_LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <defs>
+    <linearGradient id="tgr-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b101d"/>
+      <stop offset="50%" stop-color="#0d1527"/>
+      <stop offset="100%" stop-color="#141a2e"/>
+    </linearGradient>
+    <linearGradient id="tgr-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00aaff" stop-opacity="0.85"/>
+      <stop offset="50%" stop-color="#6366f1" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.8"/>
+    </linearGradient>
+    <linearGradient id="tgr-plane-main" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="tgr-plane-fold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#bae6fd"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="tgr-plane-dark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0369a1"/>
+      <stop offset="100%" stop-color="#075985"/>
+    </linearGradient>
+    <linearGradient id="tgr-pulse" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="tgr-fish" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <filter id="tgr-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <rect width="64" height="64" rx="15" fill="url(#tgr-bg)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="14.25" fill="none" stroke="url(#tgr-border)" stroke-width="1.5"/>
+
+  <path d="M 44 14 A 12 12 0 0 1 52 22" stroke="url(#tgr-pulse)" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.85"/>
+  <path d="M 48 10 A 18 18 0 0 1 58 20" stroke="url(#tgr-pulse)" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.5"/>
+
+  <path d="M 12 48 C 16 46, 20 49, 23 46 C 26 43, 25 39, 28 36" stroke="url(#tgr-fish)" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.75"/>
+  <circle cx="12" cy="48" r="1.8" fill="#38bdf8" opacity="0.9"/>
+  <circle cx="17" cy="52" r="1.2" fill="#818cf8" opacity="0.6"/>
+
+  <g transform="translate(3, 1)" filter="url(#tgr-glow)">
+    <path d="M 46 16 L 18 31 L 28 36 L 46 16 Z" fill="url(#tgr-plane-fold)"/>
+    <path d="M 46 16 L 28 36 L 33 46 L 46 16 Z" fill="url(#tgr-plane-main)"/>
+    <path d="M 28 36 L 31 43 L 34 37 Z" fill="url(#tgr-plane-dark)"/>
+  </g>
+</svg>"""
+
+TG_RELAY_FAVICON_DATA_URI = f"data:image/svg+xml;base64,{base64.b64encode(TG_RELAY_LOGO_SVG.encode('utf-8')).decode('ascii')}"
+
 
 def render_admin_html() -> str:
     """Return the complete single-page application HTML for the admin dashboard."""
-    return """<!DOCTYPE html>
+    html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Moyu Telegram Relay 运维后台</title>
   <meta name="description" content="Moyu Telegram Interaction Relay 统一活动日志与运行状态审计控制台">
+  <link rel="icon" type="image/svg+xml" href="__FAVICON_DATA_URI__">
+  <link rel="alternate icon" href="/favicon.ico">
   <style>
     :root {
       --bg-base: #0a0d14;
@@ -92,15 +154,27 @@ def render_admin_html() -> str:
     }
 
     .brand-icon {
-      font-size: 22px;
       display: flex;
       align-items: center;
       justify-content: center;
       width: 38px;
       height: 38px;
       border-radius: var(--radius-md);
-      background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(6, 182, 212, 0.2));
-      border: 1px solid rgba(99, 102, 241, 0.3);
+      background: transparent;
+      border: 0;
+      flex-shrink: 0;
+      transition: transform 0.2s ease, filter 0.2s ease;
+    }
+
+    .brand-icon:hover {
+      transform: scale(1.05);
+      filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.4));
+    }
+
+    .brand-icon svg {
+      width: 100%;
+      height: 100%;
+      display: block;
     }
 
     .brand-text h1 {
@@ -747,7 +821,7 @@ def render_admin_html() -> str:
   <!-- Top Navbar -->
   <header class="navbar">
     <div class="nav-brand">
-      <div class="brand-icon">🐟</div>
+      <div class="brand-icon">__LOGO_SVG__</div>
       <div class="brand-text">
         <h1>Moyu Telegram Relay</h1>
         <div class="sub">运维监控与 15 天审计日志看板</div>
@@ -923,8 +997,13 @@ def render_admin_html() -> str:
   <!-- Login Modal (Full Web-Standard Autofill Support) -->
   <div class="modal-backdrop" id="modal-login" style="display: none;">
     <div class="login-card">
-      <h2>🔑 Moyu Relay 运维控制台</h2>
-      <p class="sub">请输入 Relay Bearer Token 验证访问权限</p>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+        <div style="width:44px;height:44px;flex-shrink:0;">__LOGO_SVG__</div>
+        <div>
+          <h2>Moyu Relay 运维控制台</h2>
+          <p class="sub">请输入 Relay Bearer Token 验证访问权限</p>
+        </div>
+      </div>
 
       <!-- Standard HTML form structure for password managers (1Password, Bitwarden, Apple Keychain) -->
       <form id="login-form" method="POST" action="javascript:void(0);">
@@ -1549,3 +1628,4 @@ def render_admin_html() -> str:
 </body>
 </html>
 """
+    return html.replace("__FAVICON_DATA_URI__", TG_RELAY_FAVICON_DATA_URI).replace("__LOGO_SVG__", TG_RELAY_LOGO_SVG)

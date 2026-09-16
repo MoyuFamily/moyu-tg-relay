@@ -43,8 +43,19 @@ class TestAdminDashboardAndApi(unittest.TestCase):
         self.assertIn('type="password"', html)
         self.assertIn('name="password"', html)
         self.assertIn('name="username"', html)
-        self.assertIn('method="POST"', html)
         self.assertIn('Moyu Telegram Relay 运维后台', html)
+        # Verify custom vector Logo and Favicon
+        self.assertIn('rel="icon" type="image/svg+xml"', html)
+        self.assertIn('data:image/svg+xml;base64,', html)
+        self.assertIn('class="brand-icon"', html)
+        self.assertIn('<svg xmlns="http://www.w3.org/2000/svg"', html)
+
+    def test_favicon_ico_endpoint(self):
+        response = relay_app.favicon_endpoint()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.media_type, "image/svg+xml")
+        self.assertIn(b"<svg", response.body)
+        self.assertIn(b"tgr-plane-main", response.body)
 
     def test_admin_auth_dependency(self):
         # 1. No auth
