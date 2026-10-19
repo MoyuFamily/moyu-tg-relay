@@ -517,7 +517,7 @@ async def _process_incoming_telegram_message(
         except KeyError:
             return False
         if current.account != account_key or current.status not in {
-            "pending", "auto_attempted", "human_required"
+            "pending", "auto_attempted", "human_required", "ready"
         }:
             return False
         return await _process_incoming_telegram_message_unlocked(
@@ -712,7 +712,9 @@ async def _poll_pending_interaction(
                     current = store.get(request.request_id)
                 except KeyError:
                     return
-                if current.account != account_key or current.status not in {"pending", "auto_attempted", "human_required"}:
+                if current.account != account_key or current.status not in {
+                    "pending", "auto_attempted", "human_required", "ready"
+                }:
                     return
                 msg_date = getattr(msg, "date", None)
                 if msg_date:

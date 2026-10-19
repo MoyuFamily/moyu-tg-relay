@@ -43,6 +43,15 @@ class RelayStoreTests(unittest.TestCase):
             request.request_id,
         )
 
+    def test_store_updates_code_when_already_ready(self):
+        store = PendingOtpStore()
+        request = store.create("123", provider="hax")
+        store.attach_code(account="123", code="CODE-1")
+        self.assertEqual(store.get(request.request_id).status, "ready")
+        self.assertEqual(store.attach_code(account="123", code="CODE-2"), request.request_id)
+        self.assertEqual(store.consume(request.request_id), "CODE-2")
+
+
     def test_expired_request_rejects_late_code(self):
         clock = FakeClock()
         store = PendingOtpStore(clock=clock)
