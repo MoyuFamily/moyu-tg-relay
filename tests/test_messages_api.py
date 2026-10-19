@@ -2,7 +2,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from fastapi.testclient import TestClient
+
+from fastapi import HTTPException
 
 import moyu_tg_relay.app as app
 from moyu_tg_relay.log_store import RelayLogStore
@@ -22,7 +23,6 @@ class TestMessagesApi(unittest.TestCase):
             clock=lambda: self.current_time,
         )
         app.log_store = self.store
-        self.client = TestClient(app.app)
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -30,23 +30,25 @@ class TestMessagesApi(unittest.TestCase):
         app.log_store = self.original_log_store
 
     def test_messages_endpoint_requires_auth(self):
-        resp = self.client.get("/v1/messages")
-        self.assertEqual(resp.status_code, 401)
+        # 1. No Authorization header
+        with self.assertRaises(HTTPException) as ctx:
+            app.require_auth(None)
+        self.assertEqual(ctx.exception.status_code, 401)
 
-        resp = self.client.get("/v1/messages", headers={"Authorization": "Bearer wrong-token"})
-        self.assertEqual(resp.status_code, 401)
+        # 2. Invalid Bearer token
+        with self.assertRaises(HTTPException) as ctx:
+            app.require_auth("Bearer wrong-token")
+        self.assertEqual(ctx.exception.status_code, 401)
+
+        # 3. Valid Bearer token
+        app.require_auth("Bearer secret-test-token")
 
     def test_messages_endpoint_empty(self):
-        headers = {"Authorization": "Bearer secret-test-token"}
-        resp = self.client.get("/v1/messages", headers=headers)
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
+        data = app.list_messages()
         self.assertEqual(data["count"], 0)
         self.assertEqual(data["messages"], [])
 
     def test_messages_endpoint_records_and_filters(self):
-        headers = {"Authorization": "Bearer secret-test-token"}
-
         # Record messages
         self.current_time = 1700000000.0
         self.store.record(
@@ -91,32 +93,24 @@ class TestMessagesApi(unittest.TestCase):
         )
 
         # 1. Fetch all
-        resp = self.client.get("/v1/messages", headers=headers)
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
+        data = app.list_messages()
         self.assertEqual(data["count"], 3)
         self.assertIn("Your HAX VPS is ready", data["messages"][0]["text"])
         self.assertIn("VPS will be removed", data["messages"][1]["text"])
         self.assertIn("Your Woiden IPv6 VPS is ready", data["messages"][2]["text"])
 
         # 2. Filter by sender (with or without @)
-        resp_sender = self.client.get("/v1/messages?sender=@HaxTG_bot", headers=headers)
-        self.assertEqual(resp_sender.status_code, 200)
-        hax_data = resp_sender.json()
+        hax_data = app.list_messages(sender="@HaxTG_bot")
         self.assertEqual(hax_data["count"], 2)
         self.assertEqual(hax_data["messages"][0]["sender_username"], "HaxTG_bot")
 
         # 3. Filter by account
-        resp_acc = self.client.get("/v1/messages?account=acc2", headers=headers)
-        self.assertEqual(resp_acc.status_code, 200)
-        acc_data = resp_acc.json()
+        acc_data = app.list_messages(account="acc2")
         self.assertEqual(acc_data["count"], 1)
         self.assertEqual(acc_data["messages"][0]["sender_username"], "WoidenTG_bot")
 
         # 4. Filter by since
-        resp_since = self.client.get("/v1/messages?since=1700000005.0", headers=headers)
-        self.assertEqual(resp_since.status_code, 200)
-        since_data = resp_since.json()
+        since_data = app.list_messages(since=1700000005.0)
         self.assertEqual(since_data["count"], 2)
         self.assertIn("VPS will be removed", since_data["messages"][0]["text"])
 
