@@ -270,6 +270,79 @@ class RelayLogStore:
                 "logs": rows,
             }
 
+    def query_messages(
+        self,
+        *,
+        account: Optional[str] = None,
+        sender: Optional[str] = None,
+        since: Optional[float] = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Query raw Telegram messages recorded in the log store.
+
+        Ordered chronologically (ASC) to support offset-based/cursor polling.
+        """
+        limit_val = max(1, min(int(limit), 200))
+        where_clauses = ["category = 'telegram'"]
+        params: list[Any] = []
+
+        if account:
+            where_clauses.append("account = ?")
+            params.append(str(account).strip())
+
+        if since is not None and since > 0:
+            where_clauses.append("timestamp > ?")
+            params.append(float(since))
+
+        if sender:
+            clean_sender = str(sender).strip().lstrip("@").lower()
+            where_clauses.append(
+                "(LOWER(json_extract(extra_json, '$.sender_username')) = ? "
+                "OR json_extract(extra_json, '$.sender_id') = ?)"
+            )
+            params.extend([clean_sender, clean_sender])
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}"
+
+        with self._lock, self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT id, timestamp, created_at, account, request_id, extra_json
+                FROM relay_logs
+                {where_sql}
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                [*params, limit_val],
+            )
+
+            results: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                extra: dict[str, Any] = {}
+                raw_extra = row["extra_json"]
+                if raw_extra:
+                    try:
+                        extra = json.loads(raw_extra)
+                    except Exception:
+                        extra = {}
+
+                results.append(
+                    {
+                        "id": row["id"],
+                        "timestamp": row["timestamp"],
+                        "created_at": row["created_at"],
+                        "account": row["account"],
+                        "request_id": row["request_id"],
+                        "sender_username": extra.get("sender_username", ""),
+                        "sender_id": extra.get("sender_id", ""),
+                        "text": extra.get("text", extra.get("text_snippet", "")),
+                        "buttons": extra.get("buttons", []),
+                    }
+                )
+            return results
+
+
     def get_stats(self) -> dict[str, Any]:
         """Aggregate statistics for admin dashboard overview."""
         now = self._clock()

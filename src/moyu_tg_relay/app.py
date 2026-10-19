@@ -8,10 +8,12 @@ authentication, and applying provider decisions.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import secrets
 import socket
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -661,6 +663,7 @@ async def _handle_telegram_message(
             "sender_username": sender_username,
             "sender_id": sender_id,
             "buttons": btn_labels,
+            "text": text,
             "text_snippet": text[:300],
             "has_active_request": request is not None,
         },
@@ -1097,6 +1100,33 @@ def cancel_request(request_id: str) -> Response:
         return Response(status_code=204)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="request not found") from error
+
+
+@app.get(
+    "/v1/messages",
+    dependencies=[Depends(require_auth)],
+)
+def list_messages(
+    account: Optional[str] = None,
+    sender: Optional[str] = None,
+    since: Optional[float] = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Retrieve raw Telegram messages recorded by the relay service.
+
+    Allows downstream services (e.g. alert bots, renewal managers) to inspect
+    bot notifications in chronological order without tight coupling.
+    """
+    messages = log_store.query_messages(
+        account=account,
+        sender=sender,
+        since=since,
+        limit=limit,
+    )
+    return {
+        "messages": messages,
+        "count": len(messages),
+    }
 
 
 # --- Admin Dashboard & Observability Endpoints ---

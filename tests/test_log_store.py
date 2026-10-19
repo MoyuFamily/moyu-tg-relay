@@ -137,6 +137,78 @@ class TestRelayLogStore(unittest.TestCase):
         self.assertEqual(stats["category_counts"]["system"], 1)
         self.assertEqual(stats["retention_days"], 15)
 
+    def test_query_messages(self):
+        self.current_time = 1700000000.0
+        self.store.record(
+            "INFO",
+            "telegram",
+            "Hax msg 1",
+            account="acc1",
+            extra={
+                "sender_username": "HaxTG_bot",
+                "sender_id": "1001",
+                "text": "Your HAX VPS is ready",
+                "buttons": ["OK"],
+            },
+        )
+        self.current_time = 1700000010.0
+        self.store.record(
+            "INFO",
+            "telegram",
+            "Woiden msg 2",
+            account="acc1",
+            extra={
+                "sender_username": "WoidenTG_bot",
+                "sender_id": "1002",
+                "text": "Your Woiden IPv6 VPS is ready",
+                "buttons": [],
+            },
+        )
+        self.current_time = 1700000020.0
+        self.store.record(
+            "INFO",
+            "system",
+            "System message",
+            account="acc1",
+        )
+        self.current_time = 1700000030.0
+        self.store.record(
+            "INFO",
+            "telegram",
+            "Hax removal",
+            account="acc2",
+            extra={
+                "sender_username": "HaxTG_bot",
+                "sender_id": "1001",
+                "text": "VPS will be removed at 2026-10-21",
+                "buttons": [],
+            },
+        )
+
+        # Query all telegram messages
+        msgs = self.store.query_messages()
+        self.assertEqual(len(msgs), 3)
+        self.assertEqual(msgs[0]["text"], "Your HAX VPS is ready")
+        self.assertEqual(msgs[0]["sender_username"], "HaxTG_bot")
+        self.assertEqual(msgs[1]["text"], "Your Woiden IPv6 VPS is ready")
+        self.assertEqual(msgs[2]["text"], "VPS will be removed at 2026-10-21")
+
+        # Query by sender
+        hax_msgs = self.store.query_messages(sender="HaxTG_bot")
+        self.assertEqual(len(hax_msgs), 2)
+        self.assertEqual(hax_msgs[0]["text"], "Your HAX VPS is ready")
+        self.assertEqual(hax_msgs[1]["text"], "VPS will be removed at 2026-10-21")
+
+        # Query by account
+        acc1_msgs = self.store.query_messages(account="acc1")
+        self.assertEqual(len(acc1_msgs), 2)
+
+        # Query by since
+        since_msgs = self.store.query_messages(since=1700000015.0)
+        self.assertEqual(len(since_msgs), 1)
+        self.assertEqual(since_msgs[0]["text"], "VPS will be removed at 2026-10-21")
+
 
 if __name__ == "__main__":
     unittest.main()
+
