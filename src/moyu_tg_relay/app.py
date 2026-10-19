@@ -1110,6 +1110,7 @@ def list_messages(
     account: Optional[str] = None,
     sender: Optional[str] = None,
     since: Optional[float] = None,
+    since_id: Optional[int] = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """Retrieve raw Telegram messages recorded by the relay service.
@@ -1121,6 +1122,7 @@ def list_messages(
         account=account,
         sender=sender,
         since=since,
+        since_id=since_id,
         limit=limit,
     )
     return {

@@ -114,6 +114,12 @@ class TestMessagesApi(unittest.TestCase):
         self.assertEqual(since_data["count"], 2)
         self.assertIn("VPS will be removed", since_data["messages"][0]["text"])
 
+        # 5. Filter by since_id
+        first_id = data["messages"][0]["id"]
+        since_id_data = app.list_messages(since_id=first_id)
+        self.assertEqual(since_id_data["count"], 2)
+        self.assertEqual(since_id_data["messages"][0]["id"], data["messages"][1]["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

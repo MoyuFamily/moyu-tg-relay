@@ -276,6 +276,7 @@ class RelayLogStore:
         account: Optional[str] = None,
         sender: Optional[str] = None,
         since: Optional[float] = None,
+        since_id: Optional[int] = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Query raw Telegram messages recorded in the log store.
@@ -289,6 +290,10 @@ class RelayLogStore:
         if account:
             where_clauses.append("account = ?")
             params.append(str(account).strip())
+
+        if since_id is not None and int(since_id) > 0:
+            where_clauses.append("id > ?")
+            params.append(int(since_id))
 
         if since is not None and since > 0:
             where_clauses.append("timestamp > ?")
