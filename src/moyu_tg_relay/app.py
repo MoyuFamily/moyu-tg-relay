@@ -15,9 +15,9 @@ import secrets
 import socket
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from telethon import TelegramClient, events
@@ -35,6 +35,12 @@ from .accounts import (
     make_runtime,
     normalize_phone,
     normalize_username,
+)
+from .bot_interaction import (
+    BotInteraction,
+    BotInteractionStore,
+    _find_matching_button,
+    _serialize_message,
 )
 from .log_store import RelayLogStore
 from .providers import IncomingMessage, TelegramProvider, build_provider_registry
@@ -115,6 +121,11 @@ FILTER_CHAT_MESSAGES = os.environ.get("FILTER_CHAT_MESSAGES", "true").strip().lo
 }
 SYSTEM_SENDER_IDS = frozenset({"777000", "42777"})
 store = PendingOtpStore(persistence_path=OTP_STORE_FILE)
+BOT_INTERACTION_STORE_FILE = os.environ.get(
+    "BOT_INTERACTION_STORE_FILE",
+    str(STATE_DIR / "bot_interactions.json"),
+).strip()
+bot_store = BotInteractionStore(persistence_path=BOT_INTERACTION_STORE_FILE)
 log_store = RelayLogStore(db_path=RELAY_LOG_DB_PATH, retention_days=LOG_RETENTION_DAYS)
 providers: dict[str, TelegramProvider] = build_provider_registry()
 telegram: Optional[TelegramClient] = None
@@ -148,6 +159,42 @@ class StatusResponse(BaseModel):
 
 class ConsumeResponse(BaseModel):
     code: str
+
+
+class CreateBotInteractionRequest(BaseModel):
+    bot: str
+    command: Optional[str] = None
+    action: Optional[Union[str, list[str]]] = None
+    account: Optional[str] = None
+    wait_response_timeout: float = Field(default=30.0, ge=1.0, le=600.0)
+    wait_result_timeout: float = Field(default=60.0, ge=1.0, le=600.0)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateBotInteractionResponse(BaseModel):
+    interaction_id: str
+    status: str
+    stage: str
+    account: str
+    bot: str
+    created_at: float
+    expires_at: float
+
+
+class BotInteractionStatusResponse(BaseModel):
+    interaction_id: str
+    status: str
+    stage: str
+    account: str
+    bot: str
+    command_sent: Optional[str] = None
+    action_clicked: Optional[str] = None
+    initial_message: Optional[dict[str, Any]] = None
+    result_message: Optional[dict[str, Any]] = None
+    available_buttons: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    created_at: float
+    expires_at: float
 
 
 def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
@@ -1131,6 +1178,345 @@ def list_messages(
         "messages": messages,
         "count": len(messages),
     }
+
+
+# --- Generic Bot Interaction Endpoints ---
+
+
+async def _execute_bot_interaction(interaction_id: str) -> None:
+    try:
+        interaction = bot_store.get(interaction_id)
+    except KeyError:
+        return
+
+    account_key = interaction.account
+    runtime = _runtime_for(account_key)
+    selected_client = runtime.client if runtime else (
+        telegram if account_key == TELEGRAM_ACCOUNT_ID else None
+    )
+
+    if not _client_ready(selected_client):
+        bot_store.update(
+            interaction_id,
+            status="failed",
+            error="telegram_client_not_ready",
+        )
+        return
+
+    async with _account_lock(account_key):
+        try:
+            bot_store.update(interaction_id, status="in_progress", stage="starting")
+            log_store.record(
+                level="INFO",
+                category="bot_interaction",
+                message=f"开始与 @{interaction.bot} 交互 (账号: {account_key})",
+                account=account_key,
+                detail=f"command={interaction.command or '<none>'}, action={interaction.action or '<none>'}",
+            )
+
+            peer = interaction.bot.strip().lstrip("@")
+            total_timeout = max(
+                120.0,
+                interaction.wait_response_timeout + interaction.wait_result_timeout + 60.0,
+            )
+
+            async with selected_client.conversation(
+                peer,
+                timeout=total_timeout,
+                max_messages=100,
+                exclusive=False,
+            ) as conv:
+                initial_msg = None
+                if interaction.command:
+                    bot_store.update(
+                        interaction_id,
+                        stage="sending_command",
+                        command_sent=interaction.command,
+                    )
+                    await conv.send_message(interaction.command)
+                    bot_store.update(interaction_id, stage="waiting_response")
+                    try:
+                        initial_msg = await conv.get_response(
+                            timeout=interaction.wait_response_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        bot_store.update(
+                            interaction_id,
+                            status="timeout",
+                            stage="waiting_response_timeout",
+                            error="wait_response_timeout",
+                        )
+                        log_store.record(
+                            level="WARNING",
+                            category="bot_interaction",
+                            message=f"等待 @{interaction.bot} 首条回复超时 ({interaction.wait_response_timeout}s)",
+                            account=account_key,
+                        )
+                        return
+                else:
+                    msgs = await selected_client.get_messages(peer, limit=1)
+                    if msgs:
+                        initial_msg = msgs[0]
+
+                if initial_msg is None:
+                    bot_store.update(
+                        interaction_id,
+                        status="failed",
+                        error="no_message_found",
+                    )
+                    return
+
+                serialized_initial = _serialize_message(initial_msg)
+                bot_store.update(
+                    interaction_id,
+                    initial_message=serialized_initial,
+                    available_buttons=serialized_initial.get("buttons", []),
+                )
+
+                if not interaction.action:
+                    bot_store.update(
+                        interaction_id,
+                        status="completed",
+                        stage="done",
+                    )
+                    log_store.record(
+                        level="INFO",
+                        category="bot_interaction",
+                        message=f"与 @{interaction.bot} 指令交互完成 (无需点击动作)",
+                        account=account_key,
+                    )
+                    return
+
+                buttons = _iter_message_buttons(initial_msg)
+                matched_btn, matched_text = _find_matching_button(buttons, interaction.action)
+
+                if matched_btn is None:
+                    bot_store.update(
+                        interaction_id,
+                        status="failed",
+                        stage="action_not_found",
+                        error="action_button_not_found",
+                    )
+                    log_store.record(
+                        level="WARNING",
+                        category="bot_interaction",
+                        message=f"在 @{interaction.bot} 消息中未找到匹配 Action 的按钮",
+                        account=account_key,
+                        detail=f"action={interaction.action}, available={serialized_initial.get('buttons', [])}",
+                    )
+                    return
+
+                bot_store.update(
+                    interaction_id,
+                    stage="action_clicked",
+                    action_clicked=matched_text,
+                )
+                log_store.record(
+                    level="INFO",
+                    category="bot_interaction",
+                    message=f"点击 @{interaction.bot} 按钮: {matched_text}",
+                    account=account_key,
+                )
+
+                # Simulate human delay before tapping button (1.2s - 3.0s) to evade bot detection
+                click_delay_env = os.environ.get("BOT_INTERACTION_CLICK_DELAY", "").strip()
+                if click_delay_env:
+                    try:
+                        click_delay = float(click_delay_env)
+                    except ValueError:
+                        click_delay = 0.0
+                else:
+                    click_delay = round(secrets.randbelow(180) / 100.0 + 1.2, 2)
+
+                if click_delay > 0:
+                    await asyncio.sleep(click_delay)
+
+                try:
+                    await matched_btn.click()
+                except Exception as click_err:
+                    bot_store.update(
+                        interaction_id,
+                        status="failed",
+                        stage="click_failed",
+                        error=f"button_click_failed: {click_err}",
+                    )
+                    return
+
+                bot_store.update(interaction_id, stage="waiting_result")
+                result_msg = None
+                try:
+                    resp_coro = conv.get_response(timeout=interaction.wait_result_timeout)
+                    edit_coro = conv.get_edit(initial_msg, timeout=interaction.wait_result_timeout)
+
+                    resp_task = asyncio.create_task(resp_coro)
+                    edit_task = asyncio.create_task(edit_coro)
+                    done, pending = await asyncio.wait(
+                        [resp_task, edit_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for p in pending:
+                        p.cancel()
+                    for t in done:
+                        try:
+                            result_msg = t.result()
+                            break
+                        except Exception:
+                            pass
+                except Exception as wait_err:
+                    log_store.record(
+                        level="WARNING",
+                        category="bot_interaction",
+                        message=f"等待 @{interaction.bot} 结果时异常: {wait_err}",
+                        account=account_key,
+                    )
+
+                if result_msg is None:
+                    bot_store.update(
+                        interaction_id,
+                        status="timeout",
+                        stage="waiting_result_timeout",
+                        error="wait_result_timeout",
+                    )
+                    log_store.record(
+                        level="WARNING",
+                        category="bot_interaction",
+                        message=f"等待 @{interaction.bot} 点击后回执超时 ({interaction.wait_result_timeout}s)",
+                        account=account_key,
+                    )
+                    return
+
+                serialized_result = _serialize_message(result_msg)
+                bot_store.update(
+                    interaction_id,
+                    status="completed",
+                    stage="done",
+                    result_message=serialized_result,
+                )
+                log_store.record(
+                    level="INFO",
+                    category="bot_interaction",
+                    message=f"与 @{interaction.bot} 交互成功完成",
+                    account=account_key,
+                    detail=f"result_id={serialized_result.get('id')}",
+                )
+
+        except asyncio.TimeoutError:
+            bot_store.update(
+                interaction_id,
+                status="timeout",
+                error="conversation_overall_timeout",
+            )
+        except Exception as err:
+            bot_store.update(
+                interaction_id,
+                status="failed",
+                error=f"interaction_exception: {type(err).__name__}: {err}",
+            )
+            log_store.record(
+                level="ERROR",
+                category="bot_interaction",
+                message=f"与 @{interaction.bot} 交互发生异常: {err}",
+                account=account_key,
+            )
+
+
+@app.post(
+    "/v1/bot/interactions",
+    response_model=CreateBotInteractionResponse,
+    dependencies=[Depends(require_auth)],
+)
+def create_bot_interaction(
+    payload: CreateBotInteractionRequest,
+    background_tasks: BackgroundTasks,
+) -> CreateBotInteractionResponse:
+    bot = payload.bot.strip().lstrip("@")
+    if not bot:
+        raise HTTPException(status_code=400, detail="bot is required")
+
+    target_account = str(payload.account or "").strip()
+    if not target_account:
+        if len(account_runtimes) == 1:
+            account_key = next(iter(account_runtimes.keys()))
+        elif TELEGRAM_ACCOUNT_ID and (TELEGRAM_ACCOUNT_ID in account_runtimes or not account_runtimes):
+            account_key = TELEGRAM_ACCOUNT_ID
+        else:
+            account_key = None
+    else:
+        candidates = _account_match_candidates(target_account)
+        account_key = _resolve_account_id(target_account)
+        if account_key is None and _is_matching_account(target_account):
+            account_key = TELEGRAM_ACCOUNT_ID or target_account
+        if len(candidates) > 1:
+            raise HTTPException(status_code=409, detail="account is ambiguous")
+    if account_key is None:
+        raise HTTPException(status_code=403, detail="account does not match relay session")
+
+    if not _telegram_ready(account_key):
+        raise HTTPException(status_code=503, detail="Telegram session for account is not ready")
+
+    interaction = bot_store.create(
+        account=account_key,
+        bot=bot,
+        command=payload.command,
+        action=payload.action,
+        wait_response_timeout=payload.wait_response_timeout,
+        wait_result_timeout=payload.wait_result_timeout,
+        context=payload.context,
+    )
+
+    background_tasks.add_task(_execute_bot_interaction, interaction.interaction_id)
+
+    return CreateBotInteractionResponse(
+        interaction_id=interaction.interaction_id,
+        status=interaction.status,
+        stage=interaction.stage,
+        account=interaction.account,
+        bot=interaction.bot,
+        created_at=interaction.created_at,
+        expires_at=interaction.expires_at,
+    )
+
+
+@app.get(
+    "/v1/bot/interactions/{interaction_id}",
+    response_model=BotInteractionStatusResponse,
+    dependencies=[Depends(require_auth)],
+)
+def get_bot_interaction(interaction_id: str) -> BotInteractionStatusResponse:
+    try:
+        item = bot_store.get(interaction_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="interaction not found") from error
+
+    return BotInteractionStatusResponse(
+        interaction_id=item.interaction_id,
+        status=item.status,
+        stage=item.stage,
+        account=item.account,
+        bot=item.bot,
+        command_sent=item.command_sent,
+        action_clicked=item.action_clicked,
+        initial_message=item.initial_message,
+        result_message=item.result_message,
+        available_buttons=item.available_buttons,
+        error=item.error,
+        created_at=item.created_at,
+        expires_at=item.expires_at,
+    )
+
+
+@app.delete(
+    "/v1/bot/interactions/{interaction_id}",
+    status_code=204,
+    response_class=Response,
+    dependencies=[Depends(require_auth)],
+)
+def cancel_bot_interaction(interaction_id: str) -> Response:
+    try:
+        bot_store.cancel(interaction_id)
+        return Response(status_code=204)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="interaction not found") from error
 
 
 # --- Admin Dashboard & Observability Endpoints ---
